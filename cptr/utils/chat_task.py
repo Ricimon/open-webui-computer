@@ -1354,6 +1354,45 @@ def _summary_checkpoint_message_id(keep_zone: list[dict], fallback: str) -> str:
     return fallback
 
 
+async def _ensure_current_prompt(
+    messages: list[dict],
+    chat_id: str,
+    summary_message_id: str,
+    message_id: str,
+    source: list[dict] | None = None,
+) -> list[dict]:
+    """Ensure the user prompt that started the task stays in the user content.
+
+    The compaction checkpoint truncates history reloads, so the prompt that
+    started the current task can be missing from a reloaded message list even
+    though it still exists in the DB. Re-insert it at the front of the list
+    (restoring its original position before the in-progress assistant message
+    at the tail) so the model keeps seeing it as a user turn across
+    compaction and approval-resume reloads.
+
+    ``summary_message_id`` is only a user message id when the task's assistant
+    message has a user parent (otherwise it equals ``message_id`` and this
+    function is a no-op).
+
+    The prompt dict is taken from ``source`` (e.g. the pre-compaction or
+    pre-reload list) when available, otherwise reloaded from the DB with the
+    same enrichment as the main history load.
+    """
+    if summary_message_id == message_id:
+        return messages
+    if any(m.get("id") == summary_message_id for m in messages):
+        return messages
+    prompt = None
+    if source:
+        prompt = next((m for m in source if m.get("id") == summary_message_id), None)
+    if prompt is None:
+        loaded, _ = await _load_message_history(chat_id, summary_message_id)
+        prompt = next((m for m in loaded if m.get("id") == summary_message_id), None)
+    if prompt is None:
+        return messages
+    return [prompt, *messages]
+
+
 # ── Connection resolution ───────────────────────────────────
 
 
@@ -1893,6 +1932,13 @@ async def run_chat_task(
             else "default"
         )
         messages, loaded_summary = await _load_message_history(chat_id, message_id)
+        # A resumed task (approval-resume) may start after the compaction
+        # checkpoint has truncated the chain, dropping the current prompt from
+        # the user content.
+        if not regeneration_prompt:
+            messages = await _ensure_current_prompt(
+                messages, chat_id, summary_message_id, message_id
+            )
         skill_settings = await get_skill_settings()
         skill_authoring_allowed = _has_prior_real_chat_content(messages, loaded_summary)
         skill_create_denial_reason = "empty_chat"
@@ -2135,7 +2181,16 @@ async def run_chat_task(
         if resumed_calls == "approval_required":
             return
         if resumed_calls == "completed":
+            pre_reload = messages
             messages, loaded_summary = await _load_message_history(chat_id, message_id)
+            if not regeneration_prompt:
+                messages = await _ensure_current_prompt(
+                    messages,
+                    chat_id,
+                    summary_message_id,
+                    message_id,
+                    source=pre_reload,
+                )
 
         last_usage: dict | None = None  # real usage from last API call
         new_messages_since: int = 0  # messages appended since last API call
@@ -2209,21 +2264,16 @@ async def run_chat_task(
                     if skill_blocks:
                         system += "\n\n" + "\n\n".join(skill_blocks)
                 system = await _apply_voice_mode_system_prompt(system, chat_params)
-                # Keep the prompt that started this task in the user content:
-                # if it fell into the drop zone, re-insert it at the front of
-                # the kept messages so the model still sees it as a user turn.
-                # The checkpoint above is already written, so its position is
-                # unchanged; the prompt also remains captured in the summary.
-                current_prompt_kept = False
-                if summary_message_id != message_id:
-                    current_prompt = next(
-                        (m for m in drop_zone if m.get("id") == summary_message_id),
-                        None,
-                    )
-                    if current_prompt is not None:
-                        keep_zone = [current_prompt, *keep_zone]
-                        current_prompt_kept = True
-                messages = keep_zone
+                # Keep the prompt that started this task in the user content
+                # (the checkpoint above is already written, so its position is
+                # unchanged; the prompt also remains captured in the summary).
+                current_prompt_kept = (
+                    summary_message_id != message_id
+                    and not any(m.get("id") == summary_message_id for m in keep_zone)
+                )
+                messages = await _ensure_current_prompt(
+                    keep_zone, chat_id, summary_message_id, message_id, source=drop_zone
+                )
                 last_usage = None  # reset after compaction
                 new_messages_since = 0
 
@@ -2603,7 +2653,16 @@ async def run_chat_task(
                     if queue_result == "approval_required":
                         return
                     if queue_result == "completed":
+                        pre_reload = messages
                         messages, loaded_summary = await _load_message_history(chat_id, message_id)
+                        if not regeneration_prompt:
+                            messages = await _ensure_current_prompt(
+                                messages,
+                                chat_id,
+                                summary_message_id,
+                                message_id,
+                                source=pre_reload,
+                            )
                         new_messages_since = 0
                         restart = True
                         continue
