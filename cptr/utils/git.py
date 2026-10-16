@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import subprocess
 import sys
 from typing import Any
 
@@ -52,6 +53,46 @@ async def _run(
     return proc.returncode, stdout, stderr
 
 
+def _run_sync(
+    *args: str,
+    cwd: str,
+    check: bool = True,
+    identity: ExecutionIdentity | None = None,
+    extra_env: dict[str, str] | None = None,
+) -> tuple[int, str, str]:
+    """Blocking version of _run() for use inside worker threads."""
+    env_extra = {"GIT_TERMINAL_PROMPT": "0", "LC_ALL": "C", **(extra_env or {})}
+    env = (
+        env_for(identity, cwd, env_extra)
+        if identity and identity.is_pam
+        else {**os.environ, **env_extra}
+    )
+    try:
+        proc = subprocess.run(
+            [
+                "git",
+                "-c",
+                "core.quotePath=false",
+                *args,
+            ],
+            cwd=cwd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=env,
+            preexec_fn=preexec_for(identity) if identity and identity.is_pam else None,
+            check=False,
+        )
+    except FileNotFoundError as exc:
+        if exc.filename != "git":
+            raise
+        raise GitError("Git is not installed", 127) from exc
+    stdout = proc.stdout.decode("utf-8", errors="replace") if proc.stdout else ""
+    stderr = proc.stderr.decode("utf-8", errors="replace") if proc.stderr else ""
+    if check and proc.returncode != 0:
+        raise GitError(stderr.strip() or stdout.strip(), proc.returncode)
+    return proc.returncode, stdout, stderr
+
+
 class GitError(Exception):
     """Raised when a git command fails."""
 
@@ -86,12 +127,22 @@ async def version(root: str, identity: ExecutionIdentity | None = None) -> str |
 
 
 async def status(root: str, identity: ExecutionIdentity | None = None) -> dict[str, Any]:
-    """Get repo status using porcelain v2 format."""
+    """Get repo status using porcelain v2 format.
+
+    The pipeline (git subprocesses plus whole-file line counting for
+    untracked files) is CPU/IO-bound, so it runs on a worker thread to keep
+    the event loop responsive on large workspaces.
+    """
+    return await asyncio.to_thread(_status_blocking, root, identity)
+
+
+def _status_blocking(root: str, identity: ExecutionIdentity | None = None) -> dict[str, Any]:
+    """Blocking implementation of status(); runs in a worker thread."""
     # Refresh Git's cached file metadata first so status catches edits whose
     # filesystem stat information was stale.
-    await _run("update-index", "-q", "--refresh", cwd=root, check=False, identity=identity)
+    _run_sync("update-index", "-q", "--refresh", cwd=root, check=False, identity=identity)
 
-    _, out, _ = await _run(
+    _, out, _ = _run_sync(
         "status",
         "--porcelain=v2",
         "--branch",
@@ -132,8 +183,8 @@ async def status(root: str, identity: ExecutionIdentity | None = None) -> dict[s
         # Prefer the working-tree status for the row label when both sides exist.
         entry["status"] = status_text
 
-    async def add_numstat(*args: str) -> None:
-        code, numstat, _ = await _run(
+    def add_numstat(*args: str) -> None:
+        code, numstat, _ = _run_sync(
             "diff", "--numstat", *args, cwd=root, check=False, identity=identity
         )
         if code != 0:
@@ -201,11 +252,11 @@ async def status(root: str, identity: ExecutionIdentity | None = None) -> dict[s
     if upstream and not has_ab:
         upstream = ""
 
-    await add_numstat()
-    await add_numstat("--staged")
+    add_numstat()
+    add_numstat("--staged")
 
     # Get remote URL for "View on GitHub/GitLab" link
-    code, remote_out, _ = await _run(
+    code, remote_out, _ = _run_sync(
         "remote", "get-url", "origin", cwd=root, check=False, identity=identity
     )
     remote_url = remote_out.strip() if code == 0 else ""
@@ -233,16 +284,27 @@ def _status_char(c: str) -> str:
 
 
 def _count_text_lines(path: str) -> int | None:
+    # Stream in chunks: a single giant read would hold the GIL (and RAM) for
+    # the whole file, starving the event loop even when called from a thread.
+    total = 0
+    newlines = 0
+    ends_with_newline = False
     try:
         with open(path, "rb") as f:
-            data = f.read()
+            while True:
+                chunk = f.read(1024 * 1024)
+                if not chunk:
+                    break
+                if b"\0" in chunk:
+                    return None
+                total += len(chunk)
+                newlines += chunk.count(b"\n")
+                ends_with_newline = chunk.endswith(b"\n")
     except OSError:
         return None
-    if b"\0" in data:
-        return None
-    if not data:
+    if total == 0:
         return 0
-    return data.count(b"\n") + (0 if data.endswith(b"\n") else 1)
+    return newlines + (0 if ends_with_newline else 1)
 
 
 async def _config_value(

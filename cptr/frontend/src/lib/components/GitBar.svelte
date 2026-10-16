@@ -187,6 +187,10 @@
 		} | null
 	);
 
+	// True while a server-side status refresh (running on a worker thread)
+	// is in flight; the bar stays mounted and shows "loading..." meanwhile.
+	const statusLoading = $derived(gitStatusStore.loading);
+
 	const workspacePath = $derived($activeWorkspace?.path ?? '');
 	const stagedFiles = $derived((gitStatus?.files ?? []).filter((f) => f.staged));
 	const unstagedFiles = $derived((gitStatus?.files ?? []).filter((f) => !f.staged));
@@ -1489,6 +1493,12 @@
 				<Icon name="chevron-down" size={9} class="text-gray-400 dark:text-gray-600" />
 			</button>
 
+			{#if statusLoading}
+				<span
+					class="ml-1.5 shrink-0 whitespace-nowrap text-[0.625rem] font-mono text-gray-400 dark:text-gray-600"
+					>loading...</span
+				>
+			{:else}
 			{#if gitStatus.ahead > 0}
 				<span
 					class="ml-1.5 shrink-0 whitespace-nowrap text-[0.625rem] font-mono text-gray-400 dark:text-gray-600"
@@ -1513,6 +1523,7 @@
 						<span class="text-red-500 dark:text-red-400">-{totalDeletions}</span>
 					</span>
 				{/if}
+			{/if}
 			{/if}
 			{#if currentPr && prReady}
 				<button
@@ -1965,6 +1976,12 @@
 
 							<!-- File list -->
 							<div class="min-w-0 flex-1 overflow-x-hidden overflow-y-auto">
+								{#if statusLoading}
+									<div
+										class="flex items-center h-7 px-2.5 font-mono text-[0.6875rem] text-gray-400 dark:text-gray-600"
+										>loading...</div
+									>
+								{:else}
 								{#each gitStatus?.files ?? [] as file (file.path)}
 									{@const fp = fPath(file.path)}
 									{@const sc = statusChar(file.status)}
@@ -2032,6 +2049,7 @@
 										</span>
 									</button>
 								{/each}
+								{/if}
 							</div>
 
 							<!-- Commit area: combined input group -->
