@@ -725,6 +725,25 @@ async def _apply_voice_mode_system_prompt(system: str, chat_params: dict) -> str
     return f"{system}\n\n[VOICE MODE]\n{prompt}"
 
 
+# Reasoning level values that map to a reasoning_effort. The UI sends
+# language-independent English enum strings, so the effort value is always
+# "low"/"medium"/"high"/"xhigh" regardless of the user's locale.
+_REASONING_EFFORTS = ("low", "medium", "high", "xhigh")
+
+
+def reasoning_chat_template_kwargs(reasoning_level: str | None) -> dict:
+    """Map a chat's reasoning level selection to chat_template_kwargs.
+
+    "off" disables thinking; low/medium/high/xhigh enable thinking at that
+    effort; "default" (and anything unrecognized) sends nothing.
+    """
+    if reasoning_level in _REASONING_EFFORTS:
+        return {"enable_thinking": True, "reasoning_effort": reasoning_level}
+    if reasoning_level == "off":
+        return {"enable_thinking": False}
+    return {}
+
+
 # ── Title generation ────────────────────────────────────────
 
 
@@ -2214,6 +2233,18 @@ async def run_chat_task(
         )
         compact_token_threshold = compact_token_threshold or resolve_compact_token_threshold()
         request_params = {**global_rp, **model_rp, **chat_request_params} or None
+
+        # Reasoning level (per-chat UI selection) → chat_template_kwargs for the
+        # llama.cpp backend. "default" sends nothing. UI values take precedence
+        # over any chat_template_kwargs from config, which are preserved.
+        reasoning_kwargs = reasoning_chat_template_kwargs(chat_params.get("reasoning_level"))
+        if reasoning_kwargs:
+            rp = dict(request_params or {})
+            existing = rp.get("chat_template_kwargs")
+            rp["chat_template_kwargs"] = (
+                {**existing, **reasoning_kwargs} if isinstance(existing, dict) else reasoning_kwargs
+            )
+            request_params = rp
 
         for _iteration in range(CHAT_MAX_ITERATIONS):
             # ── Context compaction: summarize older messages if too large ──
