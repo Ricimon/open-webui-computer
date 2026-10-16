@@ -2209,17 +2209,32 @@ async def run_chat_task(
                     if skill_blocks:
                         system += "\n\n" + "\n\n".join(skill_blocks)
                 system = await _apply_voice_mode_system_prompt(system, chat_params)
+                # Keep the prompt that started this task in the user content:
+                # if it fell into the drop zone, re-insert it at the front of
+                # the kept messages so the model still sees it as a user turn.
+                # The checkpoint above is already written, so its position is
+                # unchanged; the prompt also remains captured in the summary.
+                current_prompt_kept = False
+                if summary_message_id != message_id:
+                    current_prompt = next(
+                        (m for m in drop_zone if m.get("id") == summary_message_id),
+                        None,
+                    )
+                    if current_prompt is not None:
+                        keep_zone = [current_prompt, *keep_zone]
+                        current_prompt_kept = True
                 messages = keep_zone
                 last_usage = None  # reset after compaction
                 new_messages_since = 0
 
                 logger.info(
-                    "[task %s] compacted: checkpoint=%s dropped %d msgs, kept %d, summary=%d chars",
+                    "[task %s] compacted: checkpoint=%s dropped %d msgs, kept %d, summary=%d chars, current_prompt_kept=%s",
                     message_id[:8],
                     checkpoint_message_id[:8],
                     len(drop_zone),
                     len(keep_zone),
                     len(summary),
+                    current_prompt_kept,
                 )
 
             # Anthropic supports images natively in tool_result content blocks.
