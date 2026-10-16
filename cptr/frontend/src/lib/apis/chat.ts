@@ -61,10 +61,13 @@ export interface SendMessageResult {
 
 export type ToolApprovalMode = 'ask' | 'auto' | 'full';
 
+export type ReasoningLevel = 'default' | 'off' | 'low' | 'medium' | 'high' | 'xhigh';
+
 export interface ChatSendParams {
 	tool_approval_mode?: ToolApprovalMode;
 	plan_mode?: boolean;
 	request_params?: Record<string, unknown>;
+	reasoning_level?: ReasoningLevel;
 	voice_mode?: boolean;
 }
 
@@ -206,8 +209,7 @@ export const answerAskUser = (
 	callId: string,
 	answers: Record<string, string>,
 	timedOut = false
-) =>
-	resolveToolCall(chatId, messageId, callId, 'answer', { answers, timedOut });
+) => resolveToolCall(chatId, messageId, callId, 'answer', { answers, timedOut });
 
 export const cancelTask = (chatId: string, messageId: string) =>
 	fetchJSON(`/api/chats/${chatId}/messages/${messageId}/cancel`, { method: 'POST' });

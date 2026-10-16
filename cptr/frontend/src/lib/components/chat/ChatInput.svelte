@@ -30,7 +30,7 @@
 	import Tasks from './Tasks.svelte';
 	import AskUserCard from './AskUserCard.svelte';
 	import Icon from '../Icon.svelte';
-	import type { ToolApprovalMode } from '$lib/apis/chat';
+	import type { ToolApprovalMode, ReasoningLevel } from '$lib/apis/chat';
 	import {
 		sttConfigured,
 		ttsConfigured,
@@ -69,6 +69,7 @@
 		toolApprovalMode?: ToolApprovalMode;
 		planMode?: boolean;
 		requestParams?: Record<string, unknown>;
+		reasoningLevel?: ReasoningLevel;
 		voiceModeEnabled?: boolean;
 		sending: boolean;
 		streaming?: boolean;
@@ -104,6 +105,7 @@
 		toolApprovalMode = $bindable('auto'),
 		planMode = $bindable(false),
 		requestParams = $bindable({}),
+		reasoningLevel = $bindable('default'),
 		voiceModeEnabled = $bindable(false),
 		sending,
 		streaming = false,
@@ -1639,6 +1641,7 @@
 					bind:toolApprovalMode
 					bind:planMode
 					bind:requestParams
+					bind:reasoningLevel
 					onchange={onsettingschange}
 					{ontoolapprovalchange}
 					onfiles={(files) => {

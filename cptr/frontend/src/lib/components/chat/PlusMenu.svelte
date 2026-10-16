@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import type { ToolApprovalMode } from '$lib/apis/chat';
+	import type { ToolApprovalMode, ReasoningLevel } from '$lib/apis/chat';
 	import { tooltip } from '$lib/tooltip';
 	import { t } from '$lib/i18n';
 	import Icon from '../Icon.svelte';
@@ -12,6 +12,7 @@
 		toolApprovalMode?: ToolApprovalMode;
 		planMode?: boolean;
 		requestParams?: Record<string, unknown>;
+		reasoningLevel?: ReasoningLevel;
 		onchange?: () => void;
 		ontoolapprovalchange?: (mode: ToolApprovalMode) => void;
 	}
@@ -21,12 +22,13 @@
 		toolApprovalMode = $bindable('auto'),
 		planMode = $bindable(false),
 		requestParams = $bindable({}),
+		reasoningLevel = $bindable('default'),
 		onchange,
 		ontoolapprovalchange
 	}: Props = $props();
 
 	let open = $state(false);
-	let tab = $state<'' | 'tools' | 'request_params'>('');
+	let tab = $state<'' | 'tools' | 'request_params' | 'reasoning'>('');
 	let btnEl: HTMLButtonElement | undefined = $state();
 	let menuEl: HTMLDivElement | undefined = $state();
 	let inputEl: HTMLInputElement | undefined = $state();
@@ -43,6 +45,25 @@
 	const currentModeLabel = $derived(
 		modes.find((m) => m.value === toolApprovalMode)?.label ?? $t('plusMenu.toolPermissions')
 	);
+
+	// ── Reasoning level state ────────────────────────
+	const reasoningLevels: { value: ReasoningLevel; label: string }[] = $derived([
+		{ value: 'default', label: $t('plusMenu.reasoningDefault') },
+		{ value: 'off', label: $t('plusMenu.reasoningOff') },
+		{ value: 'low', label: $t('plusMenu.reasoningLow') },
+		{ value: 'medium', label: $t('plusMenu.reasoningMedium') },
+		{ value: 'high', label: $t('plusMenu.reasoningHigh') },
+		{ value: 'xhigh', label: $t('plusMenu.reasoningXHigh') }
+	]);
+
+	const currentReasoningLabel = $derived(
+		reasoningLevels.find((l) => l.value === reasoningLevel)?.label ?? $t('plusMenu.reasoning')
+	);
+
+	function selectReasoning(level: ReasoningLevel) {
+		reasoningLevel = level;
+		onchange?.();
+	}
 
 	// ── Request params state ────────────────────────
 	let paramRows = $state<Array<{ key: string; value: string }>>(
@@ -374,6 +395,20 @@
 					{/if}
 					<Icon name="chevron-right" size={12} class="shrink-0 text-gray-400 dark:text-gray-500" />
 				</button>
+
+				<div class="app-divider h-px mx-1 my-0.5"></div>
+
+				<button
+					class="flex items-center gap-2 w-full h-7 px-2 rounded-xl text-xs text-gray-500 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-white/5 hover:text-gray-900 dark:hover:text-white transition-colors duration-75"
+					onclick={() => (tab = 'reasoning')}
+				>
+					<Icon name="brain" size={14} />
+					<span class="flex-1 text-left truncate">{$t('plusMenu.reasoning')}</span>
+					<span class="text-[0.625rem] text-gray-400 dark:text-gray-500 truncate max-w-16"
+						>{currentReasoningLabel}</span
+					>
+					<Icon name="chevron-right" size={12} class="shrink-0 text-gray-400 dark:text-gray-500" />
+				</button>
 			</div>
 		{:else if tab === 'tools'}
 			<!-- Tool permissions submenu -->
@@ -476,6 +511,44 @@
 					<Icon name="plus" size={12} />
 					<span class="flex-1 text-left">{$t('plusMenu.addParam')}</span>
 				</button>
+			</div>
+		{:else if tab === 'reasoning'}
+			<!-- Reasoning level submenu -->
+			<div class="plus-menu-slide-in-right">
+				<button
+					class="flex items-center gap-2 w-full h-7 px-2 rounded-xl text-xs text-gray-500 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-white/5 hover:text-gray-900 dark:hover:text-white transition-colors duration-75"
+					onclick={() => (tab = '')}
+				>
+					<Icon name="chevron-left" size={12} />
+					<span class="flex-1 text-left font-medium">{$t('plusMenu.reasoning')}</span>
+				</button>
+
+				<div class="app-divider h-px mx-1 my-0.5"></div>
+
+				{#each reasoningLevels as level}
+					<button
+						class="flex items-center gap-2 w-full h-7 px-2 rounded-xl text-xs transition-colors duration-75
+							{reasoningLevel === level.value
+							? 'text-gray-900 dark:text-white bg-gray-50 dark:bg-white/5'
+							: 'text-gray-500 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-white/5 hover:text-gray-900 dark:hover:text-white'}"
+						onclick={() => selectReasoning(level.value)}
+					>
+						<span class="flex-1 text-left truncate">{level.label}</span>
+						{#if reasoningLevel === level.value}
+							<svg
+								class="w-3 h-3 shrink-0 text-gray-400 dark:text-gray-500"
+								viewBox="0 0 24 24"
+								fill="none"
+								stroke="currentColor"
+								stroke-width="2.5"
+								stroke-linecap="round"
+								stroke-linejoin="round"
+							>
+								<polyline points="20 6 9 17 4 12" />
+							</svg>
+						{/if}
+					</button>
+				{/each}
 			</div>
 		{/if}
 	</div>

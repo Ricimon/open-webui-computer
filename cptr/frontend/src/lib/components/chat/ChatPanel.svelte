@@ -21,7 +21,8 @@
 		type ChatInfo,
 		type ToolApprovalMode,
 		type ContextUsage,
-		type ChatTask
+		type ChatTask,
+		type ReasoningLevel
 	} from '$lib/apis/chat';
 	import {
 		chatModels,
@@ -98,6 +99,7 @@
 	let toolApprovalMode = $state<ToolApprovalMode>('auto');
 	let planMode = $state(false);
 	let requestParams = $state<Record<string, unknown>>({});
+	let reasoningLevel = $state<ReasoningLevel>('default');
 	let voiceModeEnabled = $state(false);
 	let allMessages = $state<ChatMessageRow[]>([]);
 	const pendingAskUser = $derived.by(() => {
@@ -722,6 +724,7 @@
 		toolApprovalMode = get(defaultToolApprovalMode);
 		planMode = false;
 		requestParams = {};
+		reasoningLevel = 'default';
 		voiceModeEnabled = false;
 	}
 
@@ -739,6 +742,16 @@
 		planMode = params.plan_mode === true;
 		if (params.request_params && typeof params.request_params === 'object') {
 			requestParams = params.request_params;
+		}
+		if (
+			params.reasoning_level === 'default' ||
+			params.reasoning_level === 'off' ||
+			params.reasoning_level === 'low' ||
+			params.reasoning_level === 'medium' ||
+			params.reasoning_level === 'high' ||
+			params.reasoning_level === 'xhigh'
+		) {
+			reasoningLevel = params.reasoning_level;
 		}
 		voiceModeEnabled = params.voice_mode === true;
 		const models = get(chatModels);
@@ -904,7 +917,8 @@
 		const params: ChatSendParams = {
 			tool_approval_mode: toolApprovalMode,
 			plan_mode: planMode,
-			request_params: requestParams
+			request_params: requestParams,
+			reasoning_level: reasoningLevel
 		};
 		if (voiceModeEnabled) params.voice_mode = true;
 		return params;
@@ -1807,6 +1821,7 @@
 					bind:toolApprovalMode
 					bind:planMode
 					bind:requestParams
+					bind:reasoningLevel
 					bind:voiceModeEnabled
 					{sending}
 					{workspace}
@@ -1934,6 +1949,7 @@
 					bind:toolApprovalMode
 					bind:planMode
 					bind:requestParams
+					bind:reasoningLevel
 					bind:voiceModeEnabled
 					{sending}
 					{streaming}
