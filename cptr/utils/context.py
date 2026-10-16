@@ -10,6 +10,36 @@ def estimate_tokens(text: str) -> int:
     return max(1, len(text) // 4)
 
 
+def estimate_reasoning_tokens(message: dict) -> int:
+    """Estimated tokens for a message's reasoning (thinking).
+
+    Reasoning is replayed to the model (as reasoning_content for llama.cpp)
+    and re-sent on every call, so it must count toward the compaction token
+    estimate. Handles both the pre-request ``reasoning_items`` form and the
+    request-time ``reasoning_content`` string form.
+    """
+    reasoning_content = message.get("reasoning_content")
+    if reasoning_content:
+        return estimate_tokens(reasoning_content)
+    items = message.get("reasoning_items")
+    if not items:
+        return 0
+    length = 0
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        for blocks in (item.get("content"), item.get("summary")):
+            if isinstance(blocks, str):
+                length += len(blocks)
+            elif isinstance(blocks, list):
+                for block in blocks:
+                    if isinstance(block, str):
+                        length += len(block)
+                    elif isinstance(block, dict) and block.get("text"):
+                        length += len(block["text"])
+    return length // 4
+
+
 def estimate_messages_tokens(messages: list[dict]) -> int:
     """Total estimated tokens for a message list."""
     total = 0
@@ -26,6 +56,8 @@ def estimate_messages_tokens(messages: list[dict]) -> int:
         # Tool call arguments
         for tc in m.get("tool_calls", []):
             total += estimate_tokens(tc.get("function", {}).get("arguments", ""))
+        # Reasoning (thinking) is replayed to the model and re-sent each call
+        total += estimate_reasoning_tokens(m)
         total += 4  # per-message overhead (role, separators)
     return total
 
