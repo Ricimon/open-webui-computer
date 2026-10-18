@@ -63,9 +63,12 @@ async def summarize_messages(
         text = text[:15_000] + "\n...\n" + text[-10_000:]
 
     try:
-        from cptr.utils.ai import generate_text
+        from cptr.utils.ai import _STREAM_TIMEOUT, generate_text
         from cptr.utils.utility_models import configured_utility_model
 
+        # Summary generation must not spend tokens on reasoning. Models with
+        # a thinking-by-default chat template would otherwise burn the
+        # 1000-token budget on reasoning (same treatment as title generation).
         result = await generate_text(
             None,
             model_id=await configured_utility_model("summary_generation"),
@@ -74,9 +77,11 @@ async def summarize_messages(
             messages=[{"role": "user", "content": text}],
             system=_get_summarize_prompt(),
             max_tokens=1000,
+            request_params={"chat_template_kwargs": {"enable_thinking": False}},
+            timeout=_STREAM_TIMEOUT,
         )
-        if result is None:
-            raise RuntimeError("summary generation failed")
+        if not result or not result.strip():
+            raise RuntimeError("summary generation returned an empty result")
         logger.info("[summarize] LLM summary: %d chars", len(result))
         return result
     except Exception:

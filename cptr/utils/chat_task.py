@@ -42,6 +42,7 @@ from cptr.models import (
 )
 from cptr.socket.main import emit_to_user
 from cptr.utils.ai import (
+    _STREAM_TIMEOUT,
     ChatCompletionForm,
     generate_json,
     stream_anthropic,
@@ -810,7 +811,7 @@ async def review_tool_approval(
         ],
         system=TOOL_APPROVAL_REVIEW_PROMPT,
         max_tokens=150,
-        timeout_seconds=20,
+        timeout=20,
     )
     decision = str((parsed or {}).get("decision") or "").strip().lower()
     reason = str((parsed or {}).get("reason") or "").strip()
@@ -859,6 +860,11 @@ async def generate_chat_title(
             messages=[{"role": "user", "content": truncated}],
             system=TITLE_PROMPT,
             max_tokens=50,
+            timeout=_STREAM_TIMEOUT,
+            # Title generation must not spend tokens on reasoning; this
+            # deployment's Qwen template honors enable_thinking (it ignores
+            # enable_reasoning, which corrupts the template when combined).
+            request_params={"chat_template_kwargs": {"enable_thinking": False}},
         )
         title = (parsed.get("title", "") if isinstance(parsed, dict) else "").strip()
         if not title:
@@ -1016,9 +1022,13 @@ async def _load_message_history(chat_id: str, message_id: str) -> tuple[list[dic
         cur = msg_map.get(cur.parent_id) if cur.parent_id else None
     chain.reverse()  # root → leaf
 
-    # Find the most recent message with a chat_summary
+    # Find the most recent message with a chat_summary. The newest checkpoint
+    # subsumes all earlier ones (each new summary is rolled from the previous
+    # one), so it is the correct anchor; earlier checkpoints stay in the DB
+    # for branches that fork off before the newest one.
     existing_summary = None
-    for i, m in enumerate(chain):
+    for i in range(len(chain) - 1, -1, -1):
+        m = chain[i]
         if m.chat_summary:
             chain = chain[i:]  # keep this message and everything after
             existing_summary = m.chat_summary
