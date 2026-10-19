@@ -6,9 +6,11 @@
 		reorderWorkspaces,
 		sidebarOpen,
 		activeTab,
-		currentWorkspace
+		currentWorkspace,
+		setActiveTab,
+		type Tab
 	} from '$lib/stores';
-	import { chatEnabled, updateChatStatuses } from '$lib/stores/chat';
+	import { chatEnabled, chatStatuses, updateChatStatuses, type ChatStatus } from '$lib/stores/chat';
 	import { socketStore } from '$lib/stores/socket.svelte';
 	import {
 		deleteChat as apiDeleteChat,
@@ -37,7 +39,8 @@
 	let unbindSocketListener: (() => void) | null = null;
 	let workspacesExpanded = $state(true);
 
-	let expandedWorkspaces = $state<Set<string>>(new Set());
+	/** Workspace paths the user explicitly collapsed; the active workspace starts expanded. */
+	let collapsedWorkspaces = $state<Set<string>>(new Set());
 	let wsChatsCache = $state<Map<string, ChatInfo[]>>(new Map());
 	let wsChatsHasMore = $state<Map<string, boolean>>(new Map());
 	let wsChatsLoading = $state<Set<string>>(new Set());
@@ -45,15 +48,101 @@
 	let currentChatId = $derived($activeTab?.type === 'chat' ? $activeTab.path : null);
 	const WS_CHATS_PAGE_SIZE = 5;
 
-	function toggleWorkspaceExpand(path: string) {
-		const next = new Set(expandedWorkspaces);
-		if (next.has(path)) {
-			next.delete(path);
-		} else {
-			next.add(path);
-			if (!wsChatsCache.has(path)) fetchWorkspaceChats(path);
+	// ── Chat tree for the active workspace ──────────────────────────────
+	// Chats with an open tab are always listed first (in tab order, one row
+	// per chat) and are never truncated; only the fetched server list is
+	// paginated through "Show more".
+
+	const openChatTabEntries = $derived.by(() => {
+		const ws = $currentWorkspace;
+		if (!ws) return [];
+		const seen = new Set<string>();
+		const entries: { tab: Tab; groupId: string }[] = [];
+		for (const group of ws.groups) {
+			for (const tab of group.tabs) {
+				if (tab.type !== 'chat' || !tab.path || seen.has(tab.path)) continue;
+				seen.add(tab.path);
+				entries.push({ tab, groupId: group.id });
+			}
 		}
-		expandedWorkspaces = next;
+		return entries;
+	});
+
+	const openChatIds = $derived(new Set(openChatTabEntries.map((entry) => entry.tab.path as string)));
+
+	const serverChatById = $derived.by(() => {
+		const map = new Map<string, ChatInfo>();
+		for (const chat of wsChatsCache.get(currentPath ?? '') ?? []) map.set(chat.id, chat);
+		return map;
+	});
+
+	const closedChats = $derived.by(() => {
+		const loaded = wsChatsCache.get(currentPath ?? '');
+		if (!loaded) return [];
+		return loaded.filter((chat) => !openChatIds.has(chat.id));
+	});
+
+	function chatInfoForTab(tab: Tab, status: ChatStatus | undefined): ChatInfo {
+		const id = tab.path as string;
+		const server = serverChatById.get(id);
+		const isPending = id.startsWith('new-') || id.startsWith('pending-');
+		return {
+			id,
+			title: server?.title ?? (isPending ? $t('bar.newChat') : tab.label || 'Chat'),
+			summary: null,
+			folder: '',
+			meta: null,
+			current_message_id: null,
+			created_at: server?.created_at ?? 0,
+			updated_at: server?.updated_at ?? status?.updatedAt ?? 0,
+			last_read_at: server?.last_read_at ?? status?.lastReadAt ?? null,
+			is_active: server?.is_active ?? status?.active ?? false
+		};
+	}
+
+	type TreeRow =
+		| { key: string; kind: 'open'; chat: ChatInfo; tab: Tab; groupId: string }
+		| { key: string; kind: 'closed'; chat: ChatInfo }
+		| { key: string; kind: 'loading' }
+		| { key: string; kind: 'more' };
+
+	const treeRows = $derived.by(() => {
+		const rows: TreeRow[] = openChatTabEntries.map((entry) => {
+			const status = $chatStatuses.get(entry.tab.path as string);
+			return {
+				key: `open-${entry.tab.id}`,
+				kind: 'open' as const,
+				chat: chatInfoForTab(entry.tab, status),
+				tab: entry.tab,
+				groupId: entry.groupId
+			};
+		});
+		for (const chat of closedChats) rows.push({ key: `closed-${chat.id}`, kind: 'closed', chat });
+		const path = currentPath;
+		if (path && !wsChatsCache.has(path)) {
+			rows.push({ key: 'loading', kind: 'loading' });
+		} else if (path && wsChatsHasMore.get(path)) {
+			rows.push({ key: 'more', kind: 'more' });
+		}
+		return rows;
+	});
+
+	// The active workspace's dropdown is open by default: fetch (or refresh)
+	// its chat list whenever the active workspace changes.
+	let lastFetchedPath: string | null = null;
+	$effect(() => {
+		const path = currentPath;
+		if (!path || !$chatEnabled) return;
+		if (path === lastFetchedPath) return;
+		lastFetchedPath = path;
+		reloadWorkspaceChats(path);
+	});
+
+	function toggleActiveWorkspaceExpand(path: string) {
+		const next = new Set(collapsedWorkspaces);
+		if (next.has(path)) next.delete(path);
+		else next.add(path);
+		collapsedWorkspaces = next;
 	}
 
 	async function fetchWorkspaceChats(path: string, append = false, limit = WS_CHATS_PAGE_SIZE) {
@@ -258,14 +347,9 @@
 
 		// A chat created in another session is not yet in this sidebar's page.
 		// Refresh only that expanded workspace; all known rows update in place.
-		if (!known && data.workspace && expandedWorkspaces.has(data.workspace)) {
-			void fetchWorkspaceChats(data.workspace);
-		} else if (
-			known &&
-			typeof data.last_read_at === 'number' &&
-			data.workspace &&
-			expandedWorkspaces.has(data.workspace)
-		) {
+		if (!known && data.workspace && data.workspace === currentPath) {
+			reloadWorkspaceChats(data.workspace);
+		} else if (known && typeof data.last_read_at === 'number' && data.workspace === currentPath) {
 			reloadWorkspaceChats(data.workspace);
 		}
 	}
@@ -333,10 +417,7 @@
 	class:invisible={!workspacesExpanded}
 >
 	{#each $workspaceList as ws (ws.path)}
-		{@const isExpanded = expandedWorkspaces.has(ws.path)}
-		{@const chats = wsChatsCache.get(ws.path)}
-		{@const hasMoreChats = wsChatsHasMore.get(ws.path)}
-		{@const isLoading = wsChatsLoading.has(ws.path)}
+		{@const isExpanded = $chatEnabled && ws.path === currentPath && !collapsedWorkspaces.has(ws.path)}
 		<div class="ws-item">
 			<div
 				class="group flex items-center gap-1 w-full h-7 px-2 rounded-lg text-xs font-medium transition-colors duration-100
@@ -349,7 +430,7 @@
 					class="flex items-center gap-1.5 flex-1 min-w-0 no-underline text-inherit"
 					onclick={(e) => openWorkspace(e, ws.path)}
 				>
-					{#if $chatEnabled}
+					{#if $chatEnabled && ws.path === currentPath}
 						<span
 							class="ws-icon-toggle shrink-0"
 							role="button"
@@ -357,9 +438,9 @@
 							onclick={(e) => {
 								e.stopPropagation();
 								e.preventDefault();
-								toggleWorkspaceExpand(ws.path);
+								toggleActiveWorkspaceExpand(ws.path);
 							}}
-							aria-label={isExpanded ? $t('sidebar.collapse') : $t('sidebar.addWorkspace')}
+							aria-label={isExpanded ? $t('sidebar.collapse') : $t('sidebar.expand')}
 						>
 							<span class="ws-icon-folder"><Icon name="folder" size={14} /></span>
 							<span
@@ -407,33 +488,44 @@
 				{/if}
 			</div>
 
-			{#if $chatEnabled && isExpanded}
+			{#if isExpanded}
 				<div class="ws-chats">
-					{#if isLoading && !chats}
-						<div class="ws-chat-loading">
-							<span class="ws-chat-loading-dot"></span>
-							<span class="ws-chat-loading-dot"></span>
-							<span class="ws-chat-loading-dot"></span>
+					{#each treeRows as row, i (row.key)}
+						<div
+							class="ws-tree-row"
+							class:ws-tree-row--chat={row.kind === 'open' || row.kind === 'closed'}
+							class:ws-tree-row--last={i === treeRows.length - 1}
+						>
+							{#if row.kind === 'open'}
+								<ChatItem
+									chat={row.chat}
+									isSelected={row.chat.id === currentChatId}
+									onclick={() => setActiveTab(row.tab.id, row.groupId)}
+								/>
+							{:else if row.kind === 'closed'}
+								<ChatItem
+									chat={row.chat}
+									isSelected={row.chat.id === currentChatId}
+									onclick={() => openChat(row.chat.id, ws.path)}
+									onmenu={(e) => openChatMenu(e, row.chat.id, ws.path)}
+								/>
+							{:else if row.kind === 'loading'}
+								<div class="ws-chat-loading">
+									<span class="ws-chat-loading-dot"></span>
+									<span class="ws-chat-loading-dot"></span>
+									<span class="ws-chat-loading-dot"></span>
+								</div>
+							{:else}
+								<button
+									class="ws-chat-show-more"
+									disabled={wsChatsLoading.has(ws.path)}
+									onclick={() => fetchWorkspaceChats(ws.path, true)}
+								>
+									{$t('sidebar.showMore')}
+								</button>
+							{/if}
 						</div>
-					{:else if chats && chats.length > 0}
-						{#each chats as chat (chat.id)}
-							<ChatItem
-								{chat}
-								isSelected={chat.id === currentChatId}
-								onclick={() => openChat(chat.id, ws.path)}
-								onmenu={(e) => openChatMenu(e, chat.id, ws.path)}
-							/>
-						{/each}
-						{#if hasMoreChats}
-							<button
-								class="ws-chat-show-more"
-								disabled={isLoading}
-								onclick={() => fetchWorkspaceChats(ws.path, true)}
-							>
-								{$t('sidebar.showMore')}
-							</button>
-						{/if}
-					{/if}
+					{/each}
 				</div>
 			{/if}
 		</div>
@@ -533,14 +625,45 @@
 	}
 
 	.ws-chats {
-		margin-top: 0.125rem;
+		margin-top: 0;
 		padding-bottom: 0.25rem;
 	}
 
+	.ws-tree-row {
+		position: relative;
+		padding-left: 1.75rem;
+	}
+
+	.ws-tree-row::before {
+		content: '';
+		position: absolute;
+		left: 0.9375rem;
+		top: 0;
+		bottom: 0;
+		width: 1px;
+		background: color-mix(in oklab, var(--app-fg) 20%, transparent);
+	}
+
+	.ws-tree-row--last::before {
+		bottom: 50%;
+	}
+
+	.ws-tree-row--chat::after {
+		content: '';
+		position: absolute;
+		left: 0.9375rem;
+		top: 50%;
+		width: 0.6875rem;
+		height: 1px;
+		background: color-mix(in oklab, var(--app-fg) 20%, transparent);
+	}
+
 	.ws-chat-show-more {
-		display: block;
+		display: flex;
+		align-items: center;
 		width: 100%;
-		padding: 0.125rem 0.5rem;
+		height: 1.75rem;
+		padding: 0;
 		border: none;
 		background: none;
 		cursor: pointer;
@@ -556,8 +679,9 @@
 
 	.ws-chat-loading {
 		display: flex;
+		align-items: center;
 		gap: 0.25rem;
-		padding: 0.375rem 0.5rem;
+		height: 1.75rem;
 	}
 
 	.ws-chat-loading-dot {

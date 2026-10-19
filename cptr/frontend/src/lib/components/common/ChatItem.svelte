@@ -26,7 +26,8 @@
 				: !active && (chat.last_read_at === null || chat.updated_at > chat.last_read_at))
 	);
 
-	function formatTime(ts: number): string {
+	function formatTime(ts: number | null | undefined): string {
+		if (!ts) return '';
 		const now = Date.now();
 		const diffMs = now - ts;
 		const diffSec = Math.floor(diffMs / 1000);
@@ -45,7 +46,9 @@
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div
 	class="flex items-center gap-1.5 w-full h-7 px-2 rounded-lg cursor-pointer transition-colors duration-75
-		hover:bg-gray-50/50 dark:hover:bg-white/[0.02]"
+		{isSelected
+			? 'bg-gray-200/50 dark:bg-white/8'
+			: 'hover:bg-gray-50/50 dark:hover:bg-white/[0.02]'}"
 	role="button"
 	tabindex="0"
 	{onclick}
@@ -61,7 +64,7 @@
 		<span class="size-1.5 shrink-0 rounded-full bg-sky-500" aria-hidden="true"></span>
 	{/if}
 	<span
-		class="flex-1 text-xs truncate min-w-0 {unread
+		class="flex-1 text-xs truncate min-w-0 {unread || isSelected
 			? 'font-medium text-gray-900 dark:text-gray-100'
 			: 'text-gray-500 dark:text-gray-500'}">{chat.title}</span
 	>

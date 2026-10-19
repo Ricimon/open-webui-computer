@@ -43,6 +43,7 @@
 	"sidebar.workspaces": "Workspaces",
 	"sidebar.addWorkspace": "Add workspace",
 	"sidebar.collapse": "Collapse",
+	"sidebar.expand": "Expand",
 	"sidebar.noWorkspaces": "No workspaces yet",
 	"sidebar.settings": "Settings",
 	"sidebar.suggestFeature": "Feedback",
