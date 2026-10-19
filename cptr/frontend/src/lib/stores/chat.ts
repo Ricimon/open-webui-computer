@@ -200,6 +200,12 @@ export function bindGlobalChatListener() {
 				});
 			}
 
+			// Completion sound: always play, even when this chat is in focus
+			if (get(notificationSound) && navigator.userActivation?.hasBeenActive) {
+				const audio = new Audio('/audio/notification.mp3');
+				audio.play().catch(() => {});
+			}
+
 			// ── Notifications ──────────────────────────────────
 			// Skip if user is actively viewing this chat
 			const currentTab = get(activeTab);
