@@ -99,9 +99,30 @@ def _get_file_tree(workspace: str, max_entries: int = 200) -> str:
     return "\n".join(entries)
 
 
+def _find_instruction_file(ws: Path, name: str) -> Path | None:
+    """Locate a well-known instruction file, nearest match winning.
+
+    Looked up from the workspace root up through its parent directories,
+    so a project parent can provide shared instructions.
+    """
+    for directory in (ws, *ws.parents):
+        try:
+            candidate = directory / name
+            if candidate.is_file():
+                return candidate
+        except OSError:
+            continue
+    return None
+
+
 def _load_instruction_files(workspace: str, max_bytes: int = 32_000) -> str:
-    """Load well-known AI instruction files from workspace root."""
-    ws = Path(workspace)
+    """Load well-known AI instruction files from the workspace.
+
+    Each name is searched from the workspace root up through parent
+    directories (nearest wins), so a project parent can provide shared
+    instructions.
+    """
+    ws = Path(workspace).absolute()
     try:
         if not ws.is_dir():
             return ""
@@ -110,23 +131,21 @@ def _load_instruction_files(workspace: str, max_bytes: int = 32_000) -> str:
     parts: list[str] = []
     total = 0
     for name in INSTRUCTION_FILENAMES:
-        path = ws / name
+        path = _find_instruction_file(ws, name)
+        if path is None:
+            continue
+        remaining = max_bytes - total
+        if remaining <= 0:
+            break
         try:
-            is_file = path.is_file()
+            content = path.read_text(errors="replace")[:remaining].strip()
         except OSError:
-            is_file = False
-        if is_file:
-            remaining = max_bytes - total
-            if remaining <= 0:
-                break
-            try:
-                content = path.read_text(errors="replace")[:remaining].strip()
-            except OSError:
-                continue
-            if content:
-                parts.append(f"# {name}\n{content}")
-                total += len(content)
-                logger.debug("[instructions] Loaded %s (%d bytes)", name, len(content))
+            continue
+        if content:
+            label = name if path.parent == ws else f"{name} ({path})"
+            parts.append(f"# {label}\n{content}")
+            total += len(content)
+            logger.debug("[instructions] Loaded %s from %s (%d bytes)", name, path, len(content))
     return "\n\n".join(parts)
 
 
@@ -268,7 +287,7 @@ def _build_template_variables(
     if instructions:
         instructions_block = (
             f"<instructions>\n{instructions}\n</instructions>"
-            "\n\nThe above <instructions> were loaded from instruction files in the workspace root. "
+            "\n\nThe above <instructions> were loaded from instruction files in the workspace or its parent directories. "
             "These files persist across sessions and are user-authored workspace instructions. "
             "Managed memory is shown separately when available."
         )
