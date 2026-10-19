@@ -73,6 +73,7 @@
 	}: Props = $props();
 
 	let tabsEl: HTMLDivElement | undefined = $state();
+	let tabScrollEl: HTMLDivElement | undefined = $state();
 	let sortable: Sortable | null = null;
 
 	// Plus menu
@@ -146,6 +147,23 @@
 		if (!isActiveGroup) {
 			setActiveGroup(group.id);
 		}
+	}
+
+	// Vertical wheel over the tab row scrolls the tabs horizontally.
+	// At either scroll edge the event is left unhandled so the page scrolls.
+	function handleTabWheel(e: WheelEvent) {
+		const el = tabScrollEl;
+		if (!el) return;
+		const maxScroll = el.scrollWidth - el.clientWidth;
+		if (maxScroll <= 0) return;
+		// Dominant axis: supports natural trackpad, shift+wheel, and horizontal wheels.
+		const delta = Math.abs(e.deltaY) >= Math.abs(e.deltaX) ? e.deltaY : e.deltaX;
+		if (delta === 0) return;
+		const canScrollBack = delta < 0 && el.scrollLeft > 0;
+		const canScrollForward = delta > 0 && el.scrollLeft < maxScroll - 1;
+		if (!canScrollBack && !canScrollForward) return;
+		e.preventDefault();
+		el.scrollLeft += delta;
 	}
 
 	function toggleSidebar() {
@@ -401,7 +419,11 @@
 	{/if}
 
 	<!-- Tabs -->
-	<div class="flex items-center gap-0.5 flex-1 min-w-0 overflow-x-auto group-tabs-row py-0.5">
+	<div
+		bind:this={tabScrollEl}
+		class="flex items-center gap-0.5 flex-1 min-w-0 overflow-x-auto group-tabs-row py-0.5"
+		onwheel={handleTabWheel}
+	>
 		<div bind:this={tabsEl} class="flex items-center gap-0.5 shrink-0">
 			{#each displayTabs as tab (tab.id)}
 				{@const isActive = tab.id === group.activeTabId}
