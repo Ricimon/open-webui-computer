@@ -715,6 +715,8 @@
 	"plusMenu.reasoningMedium": "Средний",
 	"plusMenu.reasoningHigh": "Высокий",
 	"plusMenu.reasoningXHigh": "XHigh",
+	"plusMenu.compaction": "Компакция",
+	"plusMenu.compactKeep": "Сохранять",
 	"plusMenu.noParams": "Параметры не настроены",
 	"plusMenu.paramKey": "ключ",
 	"plusMenu.paramValue": "значение",

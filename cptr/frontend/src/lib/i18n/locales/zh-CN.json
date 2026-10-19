@@ -715,6 +715,8 @@
 	"plusMenu.reasoningMedium": "中",
 	"plusMenu.reasoningHigh": "高",
 	"plusMenu.reasoningXHigh": "XHigh",
+	"plusMenu.compaction": "压缩",
+	"plusMenu.compactKeep": "保留",
 	"plusMenu.noParams": "未配置参数",
 	"plusMenu.paramKey": "键",
 	"plusMenu.paramValue": "值",

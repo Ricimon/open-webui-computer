@@ -813,6 +813,8 @@
 	"plusMenu.reasoningMedium": "Medium",
 	"plusMenu.reasoningHigh": "High",
 	"plusMenu.reasoningXHigh": "XHigh",
+	"plusMenu.compaction": "Compaction",
+	"plusMenu.compactKeep": "Keep",
 	"plusMenu.noParams": "No parameters configured",
 	"plusMenu.paramKey": "key",
 	"plusMenu.paramValue": "value",

@@ -69,6 +69,7 @@ export interface ChatSendParams {
 	request_params?: Record<string, unknown>;
 	reasoning_level?: ReasoningLevel;
 	voice_mode?: boolean;
+	compact_keep_percent?: number | null;
 }
 
 export interface CompactChatResult {

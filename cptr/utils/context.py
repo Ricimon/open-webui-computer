@@ -159,6 +159,24 @@ def _parse_nonnegative_int(value: object) -> int:
     return max(0, parsed)
 
 
+# Default share of recent messages kept (as a percent) when auto-compaction
+# summarizes the older drop zone. Chats can override it per conversation.
+DEFAULT_COMPACT_KEEP_PERCENT = 40
+
+
+def resolve_compact_keep_percent(value: object) -> int:
+    """Return a per-chat "keep last N%" value clamped to 0-100.
+
+    ``None`` or unparseable values fall back to the default (40), which
+    matches the previous hardcoded keep ratio.
+    """
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return DEFAULT_COMPACT_KEEP_PERCENT
+    return min(100, max(0, parsed))
+
+
 def resolve_compact_token_threshold(
     model: str | None = None,
     *,

@@ -13,6 +13,7 @@
 		planMode?: boolean;
 		requestParams?: Record<string, unknown>;
 		reasoningLevel?: ReasoningLevel;
+		compactKeepPercent?: number | null;
 		onchange?: () => void;
 		ontoolapprovalchange?: (mode: ToolApprovalMode) => void;
 	}
@@ -23,12 +24,13 @@
 		planMode = $bindable(false),
 		requestParams = $bindable({}),
 		reasoningLevel = $bindable('default'),
+		compactKeepPercent = $bindable<number | null>(null),
 		onchange,
 		ontoolapprovalchange
 	}: Props = $props();
 
 	let open = $state(false);
-	let tab = $state<'' | 'tools' | 'request_params' | 'reasoning'>('');
+	let tab = $state<'' | 'tools' | 'request_params' | 'reasoning' | 'compaction'>('');
 	let btnEl: HTMLButtonElement | undefined = $state();
 	let menuEl: HTMLDivElement | undefined = $state();
 	let inputEl: HTMLInputElement | undefined = $state();
@@ -63,6 +65,48 @@
 	function selectReasoning(level: ReasoningLevel) {
 		reasoningLevel = level;
 		onchange?.();
+	}
+
+	// ── Compaction keep-percent (per chat) ────────────────────────
+	// Bound to the chat's saved "keep last N%" for auto-compaction. null
+	// (empty) means the default 40, shown as placeholder while the field is
+	// empty. For type="number", Svelte's bind:value holds number | null.
+	const COMPACT_KEEP_DEFAULT = 40;
+	const COMPACT_KEEP_MIN = 0;
+	const COMPACT_KEEP_MAX = 100;
+	const COMPACT_KEEP_STEP = 10;
+
+	// Clamp on blur: while typing the field holds the raw text, and the value
+	// is committed (clamped back into range) when focus leaves the input.
+	// onchange persists the value for this chat.
+	function clampCompactKeep() {
+		if (compactKeepPercent === null) return;
+		const before = compactKeepPercent;
+		compactKeepPercent = Math.min(COMPACT_KEEP_MAX, Math.max(COMPACT_KEEP_MIN, compactKeepPercent));
+		if (compactKeepPercent !== before) onchange?.();
+	}
+
+	// Custom stepper: the native spinner would step from 0 while the field is
+	// empty, so it's hidden and the value is driven directly — an empty field
+	// acts as the 40 default (the placeholder), so the first press steps from 40.
+	// Each committed step persists the value for this chat.
+	function stepCompactKeep(dir: 1 | -1) {
+		const base = compactKeepPercent === null ? COMPACT_KEEP_DEFAULT : compactKeepPercent;
+		const next = Math.min(
+			COMPACT_KEEP_MAX,
+			Math.max(COMPACT_KEEP_MIN, base + dir * COMPACT_KEEP_STEP)
+		);
+		if (next === compactKeepPercent) return;
+		compactKeepPercent = next;
+		onchange?.();
+	}
+
+	// Arrow keys keep stepping the value now that the native spinner is hidden.
+	function handleCompactKeepKeydown(e: KeyboardEvent) {
+		if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+			e.preventDefault();
+			stepCompactKeep(e.key === 'ArrowUp' ? 1 : -1);
+		}
 	}
 
 	// ── Request params state ────────────────────────
@@ -409,6 +453,17 @@
 					>
 					<Icon name="chevron-right" size={12} class="shrink-0 text-gray-400 dark:text-gray-500" />
 				</button>
+
+				<div class="app-divider h-px mx-1 my-0.5"></div>
+
+				<button
+					class="flex items-center gap-2 w-full h-7 px-2 rounded-xl text-xs text-gray-500 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-white/5 hover:text-gray-900 dark:hover:text-white transition-colors duration-75"
+					onclick={() => (tab = 'compaction')}
+				>
+					<Icon name="archive" size={14} />
+					<span class="flex-1 text-left truncate">{$t('plusMenu.compaction')}</span>
+					<Icon name="chevron-right" size={12} class="shrink-0 text-gray-400 dark:text-gray-500" />
+				</button>
 			</div>
 		{:else if tab === 'tools'}
 			<!-- Tool permissions submenu -->
@@ -550,6 +605,57 @@
 					</button>
 				{/each}
 			</div>
+		{:else if tab === 'compaction'}
+			<!-- Compaction submenu -->
+			<div class="plus-menu-slide-in-right">
+				<button
+					class="flex items-center gap-2 w-full h-7 px-2 rounded-xl text-xs text-gray-500 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-white/5 hover:text-gray-900 dark:hover:text-white transition-colors duration-75"
+					onclick={() => (tab = '')}
+				>
+					<Icon name="chevron-left" size={12} />
+					<span class="flex-1 text-left font-medium">{$t('plusMenu.compaction')}</span>
+				</button>
+
+				<div class="app-divider h-px mx-1 my-0.5"></div>
+
+				<div class="flex items-center gap-2 w-full h-7 px-2">
+					<span class="flex-1 text-left text-xs text-gray-500 dark:text-gray-400"
+						>{$t('plusMenu.compactKeep')}</span
+					>
+					<input
+						type="number"
+						min={0}
+						max={100}
+						step="10"
+						inputmode="numeric"
+						placeholder="40"
+						autocomplete="off"
+						bind:value={compactKeepPercent}
+						onblur={clampCompactKeep}
+						onkeydown={handleCompactKeepKeydown}
+						class="compact-keep w-16 shrink-0 rounded bg-gray-50 dark:bg-white/5 px-1 py-0.5 text-center text-xs font-mono text-gray-700 dark:text-gray-300 placeholder:text-gray-300 dark:placeholder:text-gray-600 outline-none"
+					/>
+					<span class="flex flex-col shrink-0">
+						<button
+							type="button"
+							aria-label="Increase keep percent"
+							onclick={() => stepCompactKeep(1)}
+							class="flex items-center justify-center w-[18px] h-[13px] rounded text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300 hover:bg-gray-100 dark:hover:bg-white/10 transition-colors duration-100 cursor-pointer"
+						>
+							<Icon name="chevron-up" size={10} />
+						</button>
+						<button
+							type="button"
+							aria-label="Decrease keep percent"
+							onclick={() => stepCompactKeep(-1)}
+							class="flex items-center justify-center w-[18px] h-[13px] rounded text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300 hover:bg-gray-100 dark:hover:bg-white/10 transition-colors duration-100 cursor-pointer"
+						>
+							<Icon name="chevron-down" size={10} />
+						</button>
+					</span>
+					<span class="text-xs text-gray-400 dark:text-gray-500">%</span>
+				</div>
+			</div>
 		{/if}
 	</div>
 {/if}
@@ -585,5 +691,16 @@
 			opacity: 1;
 			transform: translateX(0);
 		}
+	}
+
+	.compact-keep::-webkit-outer-spin-button,
+	.compact-keep::-webkit-inner-spin-button {
+		-webkit-appearance: none;
+		margin: 0;
+	}
+
+	.compact-keep {
+		appearance: textfield;
+		-moz-appearance: textfield;
 	}
 </style>

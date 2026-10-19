@@ -101,6 +101,8 @@
 	let requestParams = $state<Record<string, unknown>>({});
 	let reasoningLevel = $state<ReasoningLevel>('default');
 	let voiceModeEnabled = $state(false);
+	// Per-chat "keep last N%" for auto-compaction (null = default 40).
+	let compactKeepPercent = $state<number | null>(null);
 	let allMessages = $state<ChatMessageRow[]>([]);
 	const pendingAskUser = $derived.by(() => {
 		for (const message of [...allMessages].reverse()) {
@@ -726,6 +728,7 @@
 		requestParams = {};
 		reasoningLevel = 'default';
 		voiceModeEnabled = false;
+		compactKeepPercent = null;
 	}
 
 	function loadChatSettings(meta: Record<string, any> | null) {
@@ -754,6 +757,14 @@
 			reasoningLevel = params.reasoning_level;
 		}
 		voiceModeEnabled = params.voice_mode === true;
+		const compactKeep = params.compact_keep_percent;
+		compactKeepPercent =
+			typeof compactKeep === 'number' &&
+			Number.isFinite(compactKeep) &&
+			compactKeep >= 0 &&
+			compactKeep <= 100
+				? compactKeep
+				: null;
 		const models = get(chatModels);
 		if (
 			typeof meta?.last_model === 'string' &&
@@ -918,7 +929,8 @@
 			tool_approval_mode: toolApprovalMode,
 			plan_mode: planMode,
 			request_params: requestParams,
-			reasoning_level: reasoningLevel
+			reasoning_level: reasoningLevel,
+			compact_keep_percent: compactKeepPercent
 		};
 		if (voiceModeEnabled) params.voice_mode = true;
 		return params;
@@ -1823,6 +1835,7 @@
 					bind:requestParams
 					bind:reasoningLevel
 					bind:voiceModeEnabled
+					bind:compactKeepPercent
 					{sending}
 					{workspace}
 					placeholder={$t('chat.placeholder', { name: workspaceDisplayName })}
@@ -1951,6 +1964,7 @@
 					bind:requestParams
 					bind:reasoningLevel
 					bind:voiceModeEnabled
+					bind:compactKeepPercent
 					{sending}
 					{streaming}
 					{workspace}

@@ -715,6 +715,8 @@
 	"plusMenu.reasoningMedium": "Médio",
 	"plusMenu.reasoningHigh": "Alto",
 	"plusMenu.reasoningXHigh": "XHigh",
+	"plusMenu.compaction": "Compactação",
+	"plusMenu.compactKeep": "Manter",
 	"plusMenu.noParams": "Nenhum parâmetro configurado",
 	"plusMenu.paramKey": "chave",
 	"plusMenu.paramValue": "valor",

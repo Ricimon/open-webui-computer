@@ -20,6 +20,7 @@ from cptr.utils.context import (
     estimate_messages_tokens,
     estimate_tokens,
     normalize_usage,
+    resolve_compact_keep_percent,
     resolve_compact_token_threshold,
     should_compact,
     usage_context_tokens,
@@ -2244,6 +2245,13 @@ async def run_chat_task(
         compact_token_threshold = compact_token_threshold or resolve_compact_token_threshold()
         request_params = {**global_rp, **model_rp, **chat_request_params} or None
 
+        # Per-chat "keep last N%" (plus-menu compaction setting): the keep zone
+        # is the last N% of messages; everything older forms the drop zone.
+        # 100 keeps everything, which disables auto-compaction for this chat.
+        compact_keep_percent = resolve_compact_keep_percent(
+            chat_params.get("compact_keep_percent")
+        )
+
         # Reasoning level (per-chat UI selection) → chat_template_kwargs for the
         # llama.cpp backend. "default" sends nothing. UI values take precedence
         # over any chat_template_kwargs from config, which are preserved.
@@ -2258,14 +2266,14 @@ async def run_chat_task(
 
         for _iteration in range(CHAT_MAX_ITERATIONS):
             # ── Context compaction: summarize older messages if too large ──
-            if should_compact(
+            if compact_keep_percent < 100 and should_compact(
                 messages,
                 system,
                 last_usage,
                 new_messages_since,
                 threshold=compact_token_threshold,
             ):
-                target_keep = max(2, len(messages) * 2 // 5)
+                target_keep = max(2, len(messages) * compact_keep_percent // 100)
                 split_idx = _find_safe_split(messages, target_keep)
                 drop_zone = messages[:split_idx]
                 keep_zone = messages[split_idx:]

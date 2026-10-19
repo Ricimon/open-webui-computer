@@ -71,6 +71,7 @@
 		requestParams?: Record<string, unknown>;
 		reasoningLevel?: ReasoningLevel;
 		voiceModeEnabled?: boolean;
+		compactKeepPercent?: number | null;
 		sending: boolean;
 		streaming?: boolean;
 		workspace?: string;
@@ -107,6 +108,7 @@
 		requestParams = $bindable({}),
 		reasoningLevel = $bindable('default'),
 		voiceModeEnabled = $bindable(false),
+		compactKeepPercent = $bindable<number | null>(null),
 		sending,
 		streaming = false,
 		workspace = '',
@@ -1642,6 +1644,7 @@
 					bind:planMode
 					bind:requestParams
 					bind:reasoningLevel
+					bind:compactKeepPercent
 					onchange={onsettingschange}
 					{ontoolapprovalchange}
 					onfiles={(files) => {
