@@ -6,6 +6,12 @@
  * - port_added / port_removed events (for port notifications)
  *
  * Replaces the old fsWatch store.
+ *
+ * Filesystem watches are lazy: the server only watches the exact set of
+ * directories requested via `watch_paths` (one directory each, never a
+ * recursive tree). `connect()` sets the primary directory; components can
+ * additionally watch directories they display (e.g. expanded tree nodes)
+ * via `addWatch()` / `removeWatch()`.
  */
 
 export interface PortInfo {
@@ -15,9 +21,14 @@ export interface PortInfo {
 	session_id: string | null;
 }
 
+// Bound for lazily-added watches (the server enforces the same cap).
+const MAX_EXTRA_WATCHES = 256;
+
 let ws: WebSocket | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-let currentWatchPath: string | null = null;
+let sendTimer: ReturnType<typeof setTimeout> | null = null;
+let primaryPath: string | null = null;
+const extraWatchRefs = new Map<string, number>();
 
 // ── FS events ────────────────────────────────────────────────────
 let _fsTick = $state(0);
@@ -28,14 +39,31 @@ let _ports = $state<PortInfo[]>([]);
 let _newPorts = $state<PortInfo[]>([]);
 let _dismissedPorts = new Set<number>();
 
+function desiredWatchPaths(): string[] {
+	const set = new Set<string>(extraWatchRefs.keys());
+	if (primaryPath) set.add(primaryPath);
+	return [...set];
+}
+
+function sendWatchPaths() {
+	if (!ws || ws.readyState !== WebSocket.OPEN) return;
+	ws.send(JSON.stringify({ type: 'watch_paths', paths: desiredWatchPaths() }));
+}
+
+function scheduleSendWatchPaths() {
+	if (sendTimer) return;
+	sendTimer = setTimeout(() => {
+		sendTimer = null;
+		sendWatchPaths();
+	}, 100);
+}
+
 function connect(watchPath: string) {
-	currentWatchPath = watchPath;
+	primaryPath = watchPath;
 
 	if (ws && ws.readyState <= WebSocket.OPEN) {
-		// Already connected, just update watch path
-		if (ws.readyState === WebSocket.OPEN) {
-			ws.send(JSON.stringify({ type: 'watch_path', path: watchPath }));
-		}
+		// Already connected, just update the watch set
+		scheduleSendWatchPaths();
 		return;
 	}
 
@@ -43,6 +71,12 @@ function connect(watchPath: string) {
 	const url = `${protocol}//${location.host}/api/events/ws?path=${encodeURIComponent(watchPath)}`;
 
 	ws = new WebSocket(url);
+
+	ws.onopen = () => {
+		// (Re-)send the full watch set after (re)connecting so lazily
+		// added directories are resubscribed.
+		sendWatchPaths();
+	};
 
 	ws.onmessage = (event) => {
 		try {
@@ -76,7 +110,7 @@ function connect(watchPath: string) {
 		ws = null;
 		if (reconnectTimer) clearTimeout(reconnectTimer);
 		reconnectTimer = setTimeout(() => {
-			if (currentWatchPath) connect(currentWatchPath);
+			if (primaryPath) connect(primaryPath);
 		}, 2000);
 	};
 
@@ -90,19 +124,39 @@ function disconnect() {
 		clearTimeout(reconnectTimer);
 		reconnectTimer = null;
 	}
+	if (sendTimer) {
+		clearTimeout(sendTimer);
+		sendTimer = null;
+	}
 	if (ws) {
 		ws.onclose = null;
 		ws.close();
 		ws = null;
 	}
-	currentWatchPath = null;
+	primaryPath = null;
+	extraWatchRefs.clear();
 }
 
-function watchPath(path: string) {
-	currentWatchPath = path;
-	if (ws && ws.readyState === WebSocket.OPEN) {
-		ws.send(JSON.stringify({ type: 'watch_path', path }));
-	}
+/**
+ * Add a lazily-watched directory (refcounted). Typical use: watch the
+ * directories the file browser has expanded. Only takes effect while a
+ * connection is open — the set is resent on connect.
+ */
+function addWatch(path: string) {
+	if (!path || path === primaryPath) return;
+	const refs = extraWatchRefs.get(path) ?? 0;
+	if (refs === 0 && extraWatchRefs.size >= MAX_EXTRA_WATCHES) return;
+	extraWatchRefs.set(path, refs + 1);
+	scheduleSendWatchPaths();
+}
+
+/** Remove one reference to a lazily-watched directory. */
+function removeWatch(path: string) {
+	const refs = extraWatchRefs.get(path);
+	if (!refs) return;
+	if (refs <= 1) extraWatchRefs.delete(path);
+	else extraWatchRefs.set(path, refs - 1);
+	scheduleSendWatchPaths();
 }
 
 function isRelevantFsChange(targetPath: string): boolean {
@@ -117,7 +171,8 @@ function dismissPort(port: number) {
 export const systemEvents = {
 	connect,
 	disconnect,
-	watchPath,
+	addWatch,
+	removeWatch,
 
 	// FS
 	get fsTick() {

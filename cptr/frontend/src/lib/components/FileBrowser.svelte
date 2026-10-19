@@ -409,12 +409,17 @@
 		return { destroy: () => observer.disconnect() };
 	}
 
-	// Keep the websocket watch path in sync (separate effect so it doesn't
-	// re-trigger directory fetches via fsTick feedback loops)
+	// Keep the websocket watch set in sync (separate effect so it doesn't
+	// re-trigger directory fetches via fsTick feedback loops). Watches are
+	// lazy: only the current directory and expanded tree nodes are watched,
+	// so watch cost stays proportional to the visible tree.
 	$effect(() => {
-		if (cwd) {
-			systemEvents.connect(cwd);
-		}
+		if (!cwd) return;
+		const dirs = [cwd, ...expandedDirs];
+		for (const dir of dirs) systemEvents.addWatch(dir);
+		return () => {
+			for (const dir of dirs) systemEvents.removeWatch(dir);
+		};
 	});
 
 	// Auto-refresh on filesystem changes (debounced, silent)

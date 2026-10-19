@@ -37,6 +37,7 @@ let _loading = $state(false);
 let _currentRoot = '';
 let _fetchPromise: Promise<void> | null = null;
 let _fetchSeq = 0;
+let _pendingForceRefresh = false;
 
 async function _doFetch(root: string, seq: number) {
 	if (!root) {
@@ -46,11 +47,11 @@ async function _doFetch(root: string, seq: number) {
 	_loading = true;
 	try {
 		const data = (await fetchJSON(`/api/git/status?root=${encodeURIComponent(root)}`)) as GitStatus;
-		// Only apply if root hasn't changed while we were fetching
 		if (root === _currentRoot && seq === _fetchSeq) {
 			_status = data;
 		}
 	} catch {
+		// ignore errors; keep existing state
 		if (root === _currentRoot && seq === _fetchSeq) {
 			_status = null;
 		}
@@ -58,6 +59,13 @@ async function _doFetch(root: string, seq: number) {
 		if (seq === _fetchSeq) {
 			_loading = false;
 			_fetchPromise = null;
+			// If a forced refresh was requested while this fetch was in
+			// flight, run exactly one follow-up fetch (no stacked
+			// pipelines of overlapping requests).
+			if (_pendingForceRefresh && root === _currentRoot) {
+				_pendingForceRefresh = false;
+				_fetchPromise = _doFetch(root, ++_fetchSeq);
+			}
 		}
 	}
 }
@@ -79,6 +87,7 @@ export const gitStatusStore = {
 		_currentRoot = root;
 		_status = null;
 		_fetchPromise = null;
+		_pendingForceRefresh = false;
 		this.refresh({ force: true });
 	},
 
@@ -89,17 +98,24 @@ export const gitStatusStore = {
 		_loading = false;
 		_fetchPromise = null;
 		_fetchSeq++;
+		_pendingForceRefresh = false;
 	},
 
 	/**
 	 * Refresh git status from the server.
-	 * Concurrent calls are coalesced into a single fetch.
+	 * Concurrent calls are coalesced into a single in-flight fetch; a
+	 * forced refresh while a fetch is in flight schedules exactly one
+	 * follow-up fetch (instead of stacking overlapping request
+	 * pipelines).
 	 */
 	refresh({ force = false }: { force?: boolean } = {}) {
 		if (!_currentRoot) return;
-		if (!_fetchPromise || force) {
-			const seq = ++_fetchSeq;
-			_fetchPromise = _doFetch(_currentRoot, seq);
+		if (force && _fetchPromise) {
+			_pendingForceRefresh = true;
+			return _fetchPromise;
+		}
+		if (!_fetchPromise) {
+			_fetchPromise = _doFetch(_currentRoot, ++_fetchSeq);
 		}
 		return _fetchPromise;
 	}

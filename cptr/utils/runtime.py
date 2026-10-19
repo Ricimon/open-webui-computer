@@ -26,6 +26,12 @@ from cptr.utils.identity import (
 )
 
 MAX_FILE_SIZE = 100 * 1024 * 1024
+# Cap for list_directory output. Directory file-counts use a bounded walk
+# that stops early at this cap, so listing a workspace root that contains
+# a huge tree doesn't trigger a full recursive traversal. Recursive
+# listings stop after LIST_TREE_MAX_FILES files.
+LIST_TREE_DIR_COUNT_CAP = 2000
+LIST_TREE_MAX_FILES = 20000
 MATCH_PAGE_SIZE = 100
 MAX_CONTENT_MATCHES_PER_FILE = 3
 MAX_CONTENT_SEARCH_FILE_SIZE = 1 * 1024 * 1024
@@ -466,6 +472,17 @@ def _list_directory(path: str) -> dict[str, Any]:
     return {"path": str(target), "entries": entries}
 
 
+def _count_dir_files(item: Path, cap: int) -> int:
+    """Count files under item, stopping early once cap is reached."""
+    count = 0
+    for child in item.rglob("*"):
+        if child.is_file():
+            count += 1
+            if count >= cap:
+                return cap
+    return count
+
+
 def _list_tree(path: str, recursive: bool = False) -> dict[str, Any]:
     target = _path(path)
     if not target.is_dir():
@@ -484,7 +501,9 @@ def _list_tree(path: str, recursive: bool = False) -> dict[str, Any]:
         ".svelte-kit",
     }
     lines = []
+    truncated = False
     if recursive:
+        total_files = 0
         for root, dirs, files in os.walk(target):
             dirs[:] = sorted(d for d in dirs if d not in ignore)
             rel = Path(root).relative_to(target)
@@ -495,22 +514,31 @@ def _list_tree(path: str, recursive: bool = False) -> dict[str, Any]:
                 except OSError:
                     size = 0
                 lines.append(f"{rel / filename}  ({_human_size(size)})")
+                total_files += 1
+                if total_files >= LIST_TREE_MAX_FILES:
+                    truncated = True
+                    break
+            if truncated:
+                break
     else:
         for item in sorted(target.iterdir()):
             if item.name in ignore:
                 continue
             if item.is_dir():
                 try:
-                    count = sum(1 for child in item.rglob("*") if child.is_file())
+                    count = _count_dir_files(item, LIST_TREE_DIR_COUNT_CAP)
                 except (PermissionError, OSError):
                     count = 0
-                lines.append(f"{item.name}/  ({count} files)")
+                count_text = f"{count}+" if count >= LIST_TREE_DIR_COUNT_CAP else str(count)
+                lines.append(f"{item.name}/  ({count_text} files)")
             else:
                 try:
                     size = item.stat().st_size
                 except OSError:
                     size = 0
                 lines.append(f"{item.name}  ({_human_size(size)})")
+    if truncated:
+        lines.append(f"... (truncated at {LIST_TREE_MAX_FILES} files; use a narrower path)")
     return {"text": "\n".join(lines) if lines else "(empty directory)"}
 
 

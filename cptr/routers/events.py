@@ -6,6 +6,7 @@ Replaces the old watch.py with a single multiplexed event stream.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -30,6 +31,13 @@ router = APIRouter(prefix="/api/events", tags=["events"])
 # ── Filesystem watcher ────────────────────────────────────────────
 
 
+# Max directories watched per connection. Each watched directory gets its
+# own emitter threads, so this bounds the thread count. The frontend only
+# watches directories the UI is actually showing (current directory plus
+# expanded tree nodes), never whole subtrees.
+MAX_WATCH_PATHS_PER_CONNECTION = 256
+
+
 def _create_observer():
     if platform.system() == "Darwin":
         # Prefer the native FSEvents observer on macOS – it fires only on
@@ -44,6 +52,22 @@ def _create_observer():
             # with a longer interval to reduce noise.
             return PollingObserver(timeout=3)
     return Observer()
+
+
+_shared_observer: Optional[Observer] = None
+_shared_observer_lock = threading.Lock()
+
+
+def _get_shared_observer() -> Observer:
+    """Return a single observer shared by all (non-recursive) watches."""
+    global _shared_observer
+    with _shared_observer_lock:
+        if _shared_observer is None:
+            observer = _create_observer()
+            observer.daemon = True
+            observer.start()
+            _shared_observer = observer
+        return _shared_observer
 
 
 class _ChangeCollector(FileSystemEventHandler):
@@ -95,7 +119,6 @@ class _ChangeCollector(FileSystemEventHandler):
 
 
 class _WatchEntry(NamedTuple):
-    observer: Observer
     handler: _ChangeCollector
     watch: object
     subscribers: set[asyncio.Queue[list[str]]]
@@ -106,19 +129,23 @@ _watch_registry_lock = asyncio.Lock()
 
 
 async def _subscribe_to_path(path: str) -> tuple[str, asyncio.Queue[list[str]]]:
-    """Subscribe this connection to a shared filesystem watch."""
+    """Subscribe this connection to a shared, non-recursive directory watch.
+
+    Watches are per-directory (non-recursive): the frontend lazily
+    subscribes to directories as they become visible in the UI, so the
+    watch cost stays proportional to the visible tree instead of the
+    whole workspace.
+    """
     resolved = str(Path(path).resolve())
     queue: asyncio.Queue[list[str]] = asyncio.Queue(maxsize=32)
 
     async with _watch_registry_lock:
         entry = _watch_registry.get(resolved)
         if entry is None:
-            observer = _create_observer()
-            observer.daemon = True
+            observer = _get_shared_observer()
             handler = _ChangeCollector()
-            watch = observer.schedule(handler, resolved, recursive=True)
-            observer.start()
-            entry = _WatchEntry(observer, handler, watch, set())
+            watch = observer.schedule(handler, resolved, recursive=False)
+            entry = _WatchEntry(handler, watch, set())
             _watch_registry[resolved] = entry
         entry.subscribers.add(queue)
 
@@ -126,7 +153,7 @@ async def _subscribe_to_path(path: str) -> tuple[str, asyncio.Queue[list[str]]]:
 
 
 async def _unsubscribe_from_path(path: str, queue: asyncio.Queue[list[str]]) -> None:
-    """Remove a filesystem watch subscription and stop idle observers."""
+    """Remove a filesystem watch subscription (the shared observer keeps running)."""
     async with _watch_registry_lock:
         entry = _watch_registry.get(path)
         if entry is None:
@@ -138,12 +165,7 @@ async def _unsubscribe_from_path(path: str, queue: asyncio.Queue[list[str]]) -> 
 
         _watch_registry.pop(path, None)
         try:
-            entry.observer.unschedule(entry.watch)
-        except Exception:
-            pass
-        try:
-            entry.observer.stop()
-            entry.observer.join(timeout=2)
+            _get_shared_observer().unschedule(entry.watch)
         except Exception:
             pass
 
@@ -180,42 +202,100 @@ async def _ensure_fs_dispatcher() -> None:
         _fs_dispatch_task = asyncio.create_task(_dispatch_fs_changes())
 
 
+async def _queue_reader(queue: asyncio.Queue[list[str]], out: asyncio.Queue) -> None:
+    """Forward one watched path's change batches to the connection out-queue."""
+    while True:
+        paths = await queue.get()
+        await out.put(paths)
+
+
 async def _fs_watcher_loop(ws: WebSocket, initial_path: str, path_holder: dict) -> None:
-    """Watch filesystem and push fs_change events."""
-    target = str(Path(initial_path).resolve())
-    path_holder["current"] = target
+    """Watch filesystem and push fs_change events.
+
+    The set of watched paths is maintained lazily per connection: the
+    initial path is watched on connect, and the client sends ``watch_paths``
+    messages to grow/shrink the set (e.g. directories the file browser has
+    expanded). Each watched path is a single directory, never a recursive
+    tree, so watch cost stays proportional to what the UI is showing.
+    """
+    out: asyncio.Queue = asyncio.Queue()
+    queues: dict[str, asyncio.Queue[list[str]]] = {}
+    readers: dict[str, asyncio.Task] = {}
+
+    def _start_reader(path: str, queue: asyncio.Queue[list[str]]) -> None:
+        readers[path] = asyncio.create_task(_queue_reader(queue, out))
+
+    async def _stop_reader(path: str) -> None:
+        task = readers.pop(path, None)
+        if task is not None:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+    async def _set_watched(paths: list[str]) -> None:
+        desired: dict[str, None] = {}
+        for raw in paths:
+            try:
+                resolved = str(Path(raw).resolve())
+            except (OSError, RuntimeError, ValueError):
+                continue
+            if resolved not in desired and Path(resolved).is_dir():
+                desired[resolved] = None
+
+        for path in desired:
+            if path not in queues:
+                try:
+                    resolved, queue = await _subscribe_to_path(path)
+                    queues[resolved] = queue
+                    _start_reader(resolved, queue)
+                except Exception as e:
+                    logger.warning(f"Failed to watch {path}: {e}")
+
+        for path in [p for p in queues if p not in desired]:
+            queue = queues.pop(path)
+            await _stop_reader(path)
+            await _unsubscribe_from_path(path, queue)
 
     try:
         await _ensure_fs_dispatcher()
-        current_path, queue = await _subscribe_to_path(target)
+        await _set_watched([initial_path])
+        if not queues:
+            logger.warning(f"Failed to watch {initial_path}")
+            return
     except Exception as e:
-        logger.warning(f"Failed to watch {target}: {e}")
+        logger.warning(f"Failed to watch {initial_path}: {e}")
         return
 
     try:
         while True:
-            # Check if path changed (from receive loop)
-            new_path = path_holder.get("pending")
-            if new_path:
+            # Apply a new watch set (from the receive loop)
+            new_paths = path_holder.get("pending")
+            if new_paths is not None:
                 del path_holder["pending"]
-                resolved = str(Path(new_path).resolve())
-                if resolved != path_holder["current"] and Path(resolved).is_dir():
-                    await _unsubscribe_from_path(current_path, queue)
-                    current_path, queue = await _subscribe_to_path(resolved)
-                    path_holder["current"] = resolved
-                    logger.info(f"FS watch path changed to {resolved}")
+                await _set_watched(new_paths)
 
             try:
-                paths = await asyncio.wait_for(queue.get(), timeout=1.0)
+                paths = await asyncio.wait_for(out.get(), timeout=1.0)
             except asyncio.TimeoutError:
                 continue
 
+            # Merge any already-queued batches into one event
+            merged = list(paths)
+            while True:
+                try:
+                    merged.extend(out.get_nowait())
+                except asyncio.QueueEmpty:
+                    break
+
             try:
-                await ws.send_json({"type": "fs_change", "paths": paths})
+                await ws.send_json({"type": "fs_change", "paths": merged})
             except Exception:
                 break
     finally:
-        await _unsubscribe_from_path(current_path, queue)
+        for path in list(queues):
+            queue = queues.pop(path)
+            await _stop_reader(path)
+            await _unsubscribe_from_path(path, queue)
 
 
 # ── Port scanning ─────────────────────────────────────────────────
@@ -548,10 +628,18 @@ async def _receive_loop(ws: WebSocket, path_holder: dict) -> None:
     try:
         while True:
             msg = await ws.receive_json()
-            if msg.get("type") == "watch_path":
+            msg_type = msg.get("type")
+            if msg_type == "watch_paths":
+                paths = msg.get("paths")
+                if isinstance(paths, list):
+                    path_holder["pending"] = [
+                        str(p) for p in paths if p
+                    ][:MAX_WATCH_PATHS_PER_CONNECTION]
+            elif msg_type == "watch_path":
+                # Legacy single-path form: replaces the watch set
                 new_path = msg.get("path")
                 if new_path:
-                    path_holder["pending"] = new_path
+                    path_holder["pending"] = [str(new_path)]
     except (WebSocketDisconnect, Exception):
         pass
 
@@ -571,7 +659,8 @@ async def events_ws(
       - {"type": "port_removed", "port": N}
 
     Receives:
-      - {"type": "watch_path", "path": "..."}: change fs watch directory
+      - {"type": "watch_paths", "paths": [...]}: set fs watch directories
+      - {"type": "watch_path", "path": "..."}: (legacy) set a single fs watch directory
     """
     target = Path(path).resolve()
     if not target.is_dir():
