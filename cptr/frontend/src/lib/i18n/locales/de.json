@@ -865,6 +865,7 @@
 	"chat.speakResponses": "Antworten vorlesen",
 	"chat.stopSpeaking": "Vorlesen stoppen",
 	"chat.fallbackTitle": "Unterhaltung",
+	"chat.renameTitle": "Chat umbenennen",
 	"chat.notification.approvalTitle": "Genehmigung erforderlich: {{title}}",
 	"chat.notification.inputTitle": "Eingabe erforderlich: {{title}}",
 	"chat.notification.approvalBody": "Erlaube oder verweigere {{tool}}, um fortzufahren.",

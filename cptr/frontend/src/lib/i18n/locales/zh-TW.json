@@ -865,6 +865,7 @@
 	"chat.speakResponses": "朗讀回應",
 	"chat.stopSpeaking": "停止朗讀",
 	"chat.fallbackTitle": "聊天",
+	"chat.renameTitle": "重新命名聊天",
 	"chat.notification.approvalTitle": "需要批准：{{title}}",
 	"chat.notification.inputTitle": "需要輸入：{{title}}",
 	"chat.notification.approvalBody": "允許或拒絕 {{tool}} 以繼續。",

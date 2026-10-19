@@ -865,6 +865,7 @@
 	"chat.speakResponses": "응답 읽기",
 	"chat.stopSpeaking": "읽기 중지",
 	"chat.fallbackTitle": "채팅",
+	"chat.renameTitle": "채팅 이름 변경",
 	"chat.notification.approvalTitle": "승인 필요: {{title}}",
 	"chat.notification.inputTitle": "입력 필요: {{title}}",
 	"chat.notification.approvalBody": "계속하려면 {{tool}}을(를) 허용하거나 거부하세요.",

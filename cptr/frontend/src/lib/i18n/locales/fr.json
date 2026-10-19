@@ -865,6 +865,7 @@
 	"chat.speakResponses": "Lire les réponses",
 	"chat.stopSpeaking": "Arrêter la lecture",
 	"chat.fallbackTitle": "Discussion",
+	"chat.renameTitle": "Renommer la discussion",
 	"chat.notification.approvalTitle": "Approbation requise : {{title}}",
 	"chat.notification.inputTitle": "Saisie requise : {{title}}",
 	"chat.notification.approvalBody": "Autorisez ou refusez {{tool}} pour continuer.",

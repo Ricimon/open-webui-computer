@@ -963,6 +963,7 @@
 	"chat.speakResponses": "Speak responses",
 	"chat.stopSpeaking": "Stop speaking",
 	"chat.fallbackTitle": "Chat",
+	"chat.renameTitle": "Rename chat",
 	"chat.notification.approvalTitle": "Approval needed: {{title}}",
 	"chat.notification.inputTitle": "Input needed: {{title}}",
 	"chat.notification.approvalBody": "Allow or deny {{tool}} to continue.",

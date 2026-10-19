@@ -865,6 +865,7 @@
 	"chat.speakResponses": "Ler respostas",
 	"chat.stopSpeaking": "Parar leitura",
 	"chat.fallbackTitle": "Conversa",
+	"chat.renameTitle": "Renomear conversa",
 	"chat.notification.approvalTitle": "Aprovação necessária: {{title}}",
 	"chat.notification.inputTitle": "Entrada necessária: {{title}}",
 	"chat.notification.approvalBody": "Permita ou negue {{tool}} para continuar.",

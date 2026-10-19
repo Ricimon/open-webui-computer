@@ -143,6 +143,9 @@
 	let cancelledMessageId: string | null = null;
 	let loading = $state(!!initialChatId);
 	let chatTitle = $state('');
+	let editingTitle = $state(false);
+	let draftTitle = $state('');
+	let titleInputEl: HTMLInputElement | undefined = $state();
 	let ttsQueue: string[] = [];
 	let ttsBuffer = '';
 	let ttsInsideCodeFence = false;
@@ -527,6 +530,39 @@
 				chatTitle = title;
 				if (tabId) updateTab(tabId, id, title);
 			}
+		} catch (e) {
+			toast.error(e instanceof Error ? e.message : $t('files.rename'));
+		}
+	}
+
+	// ── Inline title editing (header bar below the tab) ──────────
+
+	function startTitleEdit() {
+		if (!chatId || editingTitle) return;
+		draftTitle = displayChatTitle;
+		editingTitle = true;
+		void tick().then(() => {
+			titleInputEl?.focus();
+			titleInputEl?.select();
+		});
+	}
+
+	function cancelTitleEdit() {
+		editingTitle = false;
+	}
+
+	async function commitTitleEdit() {
+		if (!editingTitle) return;
+		editingTitle = false;
+		const id = chatId;
+		const next = draftTitle.trim();
+		if (!id || !next || next === displayChatTitle) return;
+		try {
+			await updateChatTitle(id, next);
+			if (chatId !== id) return; // chat switched while saving
+			chatTitle = next;
+			if (tabId) updateTab(tabId, id, next);
+			previousChats = previousChats.map((c) => (c.id === id ? { ...c, title: next } : c));
 		} catch (e) {
 			toast.error(e instanceof Error ? e.message : $t('files.rename'));
 		}
@@ -1780,11 +1816,45 @@
 				class="pointer-events-none absolute inset-0 -bottom-10 -z-10"
 				style="background: linear-gradient(to bottom, var(--app-bg), color-mix(in oklab, var(--app-bg) 95%, transparent) 40%, transparent 97%);"
 			></div>
-			<div
-				class="min-w-0 flex-1 truncate text-[0.6875rem] font-medium text-gray-600 dark:text-gray-400"
-			>
-				{displayChatTitle}
-			</div>
+			{#if editingTitle}
+				<input
+					bind:this={titleInputEl}
+					bind:value={draftTitle}
+					type="text"
+					autocomplete="off"
+					spellcheck="false"
+					aria-label={$t('chat.renameTitle')}
+					class="h-full min-w-0 flex-1 rounded-md bg-gray-100 px-1.5 text-[0.6875rem] font-medium text-gray-800 outline-none ring-1 ring-blue-500/50 dark:bg-white/10 dark:text-gray-200"
+					onkeydown={(e) => {
+						if (e.key === 'Enter') {
+							e.preventDefault();
+							void commitTitleEdit();
+						} else if (e.key === 'Escape') {
+							e.preventDefault();
+							cancelTitleEdit();
+						}
+					}}
+					onblur={() => void commitTitleEdit()}
+				/>
+			{:else}
+				<!-- svelte-ignore a11y_no_static_element_interactions -->
+				<div
+					role="button"
+					tabindex={chatId ? 0 : -1}
+					class="min-w-0 -mx-1.5 flex-1 cursor-pointer truncate rounded-md px-1.5 py-0.5 text-[0.6875rem] font-medium text-gray-600 transition-colors duration-75 hover:bg-gray-100 hover:text-gray-800 dark:text-gray-400 dark:hover:bg-white/10 dark:hover:text-gray-200"
+					title={$t('chat.renameTitle')}
+					use:tooltip={$t('chat.renameTitle')}
+					onclick={chatId ? startTitleEdit : undefined}
+					onkeydown={(e) => {
+						if ((e.key === 'Enter' || e.key === ' ') && chatId) {
+							e.preventDefault();
+							startTitleEdit();
+						}
+					}}
+				>
+					{displayChatTitle}
+				</div>
+			{/if}
 			<div class="flex shrink-0 items-center gap-0.5">
 				<button
 					type="button"

@@ -865,6 +865,7 @@
 	"chat.speakResponses": "Озвучивать ответы",
 	"chat.stopSpeaking": "Остановить озвучивание",
 	"chat.fallbackTitle": "Чат",
+	"chat.renameTitle": "Переименовать чат",
 	"chat.notification.approvalTitle": "Требуется подтверждение: {{title}}",
 	"chat.notification.inputTitle": "Требуется ввод: {{title}}",
 	"chat.notification.approvalBody": "Разрешите или запретите {{tool}}, чтобы продолжить.",
