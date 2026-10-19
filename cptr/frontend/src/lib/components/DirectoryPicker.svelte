@@ -66,7 +66,7 @@
 		history = [];
 		getWelcome()
 			.then((d) => {
-				const home = d.suggestions?.[0]?.path || '/';
+				const home = (d.default_dir as string | undefined) || d.suggestions?.[0]?.path || '/';
 				fetchDirectories(home);
 			})
 			.catch(() => fetchDirectories('/'));

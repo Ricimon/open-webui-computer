@@ -259,6 +259,10 @@ async def get_welcome(request: Request):
         ]
 
     system_info["recent"] = recent
+
+    # Initial directory for the "new workspace" picker.
+    default_dir = Path("/workspace")
+    system_info["default_dir"] = str(default_dir) if default_dir.is_dir() else str(user_home)
     return system_info
 
 
