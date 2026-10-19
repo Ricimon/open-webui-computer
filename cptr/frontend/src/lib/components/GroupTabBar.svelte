@@ -119,7 +119,23 @@
 		}
 	}
 
-	function handleTabClick(tab: Tab) {
+	// A tab is selected by a tap: a press released without dragging.
+	// On touch, dragging a pressed finger scrolls the row, so record the
+	// press position to tell a tap apart from a drag release.
+	let tabPressPos: { x: number; y: number } | null = null;
+	const TAB_TAP_DRAG_THRESHOLD = 8; // px
+
+	function handleTabPointerDown(e: PointerEvent) {
+		if (e.pointerType === 'mouse' && e.button !== 0) return;
+		tabPressPos = { x: e.clientX, y: e.clientY };
+	}
+
+	function handleTabClick(e: MouseEvent, tab: Tab) {
+		const press = tabPressPos;
+		tabPressPos = null;
+		if (press && Math.hypot(e.clientX - press.x, e.clientY - press.y) > TAB_TAP_DRAG_THRESHOLD) {
+			return; // Drag release, not a tap
+		}
 		if (home) return onHomeSelect?.(tab.id);
 		setActiveTab(tab.id, group.id);
 	}
@@ -435,8 +451,8 @@
 						? 'bg-gray-200/50 text-gray-900 dark:bg-white/8 dark:text-white'
 						: 'text-gray-500 hover:text-gray-700 dark:hover:text-gray-300'}"
 					data-tab-id={tab.id}
-					onpointerdown={() => handleTabClick(tab)}
-					onclick={() => handleTabClick(tab)}
+					onpointerdown={handleTabPointerDown}
+					onclick={(e) => handleTabClick(e, tab)}
 					oncontextmenu={(e) => handleContextMenu(e, tab)}
 				>
 					{#if tab.type === 'chat' && (chatStatus?.active || $streamingChatTabs.has(tab.id))}
