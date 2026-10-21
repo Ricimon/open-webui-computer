@@ -25,12 +25,14 @@ RUN uv build --wheel --out-dir /dist
 # ── Stage 3: Shared runtime ────────────────────────────────
 FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim AS runtime
 
-LABEL org.opencontainers.image.source="https://github.com/open-webui/computer"
+LABEL org.opencontainers.image.source="https://github.com/Ricimon/open-webui-computer"
 LABEL org.opencontainers.image.description="Open WebUI Computer"
 
 # Runtime deps shared by default and browser images.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends gh git tini && \
+    # Additional deps for agents
+    apt-get install -y --no-install-recommends curl && \
     rm -rf /var/lib/apt/lists/*
 
 # Create non-root user and writable data directory
