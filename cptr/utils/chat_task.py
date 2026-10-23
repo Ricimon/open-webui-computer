@@ -1356,17 +1356,12 @@ def _find_safe_split(messages: list[dict], target_keep: int) -> int:
     """Find a safe split index that doesn't break tool call pairs.
 
     Returns the index where keep_zone starts. Ensures:
-    - Prefer starting compacted history on a user turn
     - Never splits between an assistant tool_call and its tool result
     - keep_zone doesn't start with a tool result message
     - At least 2 messages are kept
     """
     n = len(messages)
     split = min(max(2, n - target_keep), max(0, n - 2))
-
-    for idx in range(split, n - 1):
-        if messages[idx].get("role") == "user":
-            return idx
 
     # Don't start keep_zone with a tool result; keep its assistant call too.
     while split > 0 and messages[split].get("role") == "tool":
@@ -1376,9 +1371,9 @@ def _find_safe_split(messages: list[dict], target_keep: int) -> int:
 
 
 def _summary_checkpoint_message_id(keep_zone: list[dict], fallback: str) -> str:
-    for message in keep_zone:
-        if message.get("role") == "user" and message.get("id"):
-            return message["id"]
+    """Anchor the summary on the first keep-zone message (the split boundary),
+    whatever its role. _find_safe_split already aligned the boundary, so the
+    keep zone survives reloads intact."""
     for message in keep_zone:
         if message.get("id"):
             return message["id"]
