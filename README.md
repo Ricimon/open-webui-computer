@@ -1,5 +1,33 @@
 # Open WebUI Computer
 
+This is a fork that fixes critical bugs and adds feature improvements.
+
+Changes compared to upstream:
+
+- The current task's user prompt is always kept even after compaction (Qwen will otherwise throw a Jinja template error).
+- Compaction token estimate now accounts for reasoning content.
+- Loading a conversation properly sets the last summary checkpoint to the latest one, instead of the earliest one.
+- Compaction summary generation sets `enable_thinking` to false, and uses the prompt stream timeout rather than a fixed 15-20s timeout.
+- GitBar information loading is taken off the main thread so that it doesn't block main chat UI loading.
+- Add reasoning level configuration to the chat Plus menu.
+- Add compaction keep-percent to the chat Plus menu, customizes what percentage of past messages are compacted.
+- Response completion audio plays even when chat tab is focused.
+- Chat title is now editable.
+- Chat tabs now scroll horizontally when extended beyond horizontal bounds.
+- (Mobile) Chat tab selection happens only touch-release rather than touch-press.
+- The active workspace has its chats expanded underneath in the sidebar by default.
+- The default path when adding a new workspace is now `/workspace` rather than `/home/cptr`.
+- Reduced first-time workspace load latency by lazily subscribing directory watchers rather than subscribing all watchers recursively.
+- Well-known instruction files (`AGENTS.md`, `AGENT.md`, `MEMORY.md`, `CLAUDE.md`) are searched for recursively upwards in a workspace.
+- `curl` is added as an apt-installed command to the `Dockerfile`.
+
+This fork has an accompanying article describing how it interfaces with a local AI setup. Read it here:  
+https://www.ricimon.com/setting-up-a-local-ai-workspace/
+
+<br>
+
+# Original Project README
+
 ![GitHub stars](https://img.shields.io/github/stars/open-webui/computer?style=social)
 ![GitHub forks](https://img.shields.io/github/forks/open-webui/computer?style=social)
 ![GitHub watchers](https://img.shields.io/github/watchers/open-webui/computer?style=social)
