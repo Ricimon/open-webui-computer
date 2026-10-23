@@ -430,6 +430,18 @@
 			// Discard stale response if a newer loadChat was called while we waited
 			if (gen !== loadGeneration) return;
 			allMessages = data.messages;
+			// Rows may now exist for events buffered while they were missing
+			// (streaming started before this load finished): replay those.
+			// Everything else is stale — the reload already reflects it.
+			const pendingByMsg = pendingEventsByChat.get(data.chat.id);
+			if (pendingByMsg) {
+				for (const [pendingId, pendingList] of pendingByMsg) {
+					if (data.messages.some((m) => m.id === pendingId)) {
+						for (const pending of pendingList) handleSocketEvent(pending);
+					}
+				}
+			}
+			pendingEventsByChat.clear();
 			loadChatSettings(data.chat.meta);
 			currentMessageId = data.chat.current_message_id;
 			contextUsage = data.context_usage ?? null;
@@ -586,6 +598,39 @@
 
 	let landingRefreshTimer: ReturnType<typeof setTimeout> | null = null;
 
+	// The server starts streaming before the HTTP send response returns, so
+	// one-shot delta events can arrive before the client can route them:
+	// - the assistant row is appended only after the response resolves, and
+	// - for a NEW chat, the chat id is also unknown until the response
+	//   resolves, while the server already streams under that id.
+	// Deltas cannot be resent, so such events are buffered here (by chat id,
+	// then message id) and replayed via flushPendingEvents() once the row
+	// exists. Entries for chats that are not this view's are discarded by
+	// the send flow and loadChat.
+	let pendingEventsByChat = new Map<string, Map<string, Parameters<typeof handleSocketEvent>[0][]>>();
+
+	function bufferPendingEvent(data: Parameters<typeof handleSocketEvent>[0]) {
+		const messageId = data.message_id;
+		if (!messageId) return;
+		let byMsg = pendingEventsByChat.get(data.chat_id);
+		if (!byMsg) {
+			byMsg = new Map();
+			pendingEventsByChat.set(data.chat_id, byMsg);
+		}
+		const list = byMsg.get(messageId);
+		if (list) list.push(data);
+		else byMsg.set(messageId, [data]);
+	}
+
+	function flushPendingEvents(chatId: string, messageId: string) {
+		const byMsg = pendingEventsByChat.get(chatId);
+		if (!byMsg) return;
+		const list = byMsg.get(messageId);
+		byMsg.delete(messageId);
+		if (byMsg.size === 0) pendingEventsByChat.delete(chatId);
+		if (list) for (const pending of list) handleSocketEvent(pending);
+	}
+
 	function handleSocketEvent(data: {
 		type?: string;
 		chat_id: string;
@@ -655,7 +700,15 @@
 			}
 		}
 
-		if (data.chat_id !== chatId) return;
+		if (data.chat_id !== chatId) {
+			// New chat: this view's chat id is only known once the send
+			// response resolves, but the server already streams under the
+			// new id. While a send is in flight pre-chat, buffer one-shot
+			// events for whatever chat they carry; the send flow keeps only
+			// the entries for the chat it created.
+			if (!chatId && sending && data.message_id) bufferPendingEvent(data);
+			return;
+		}
 
 		if (data.type === 'chat:tasks') {
 			setChatTasks(data.tasks ?? []);
@@ -679,7 +732,13 @@
 
 		if (!data.message_id) return;
 		const msg = allMessages.find((m) => m.id === data.message_id);
-		if (!msg) return;
+		if (!msg) {
+			// Row not appended yet (HTTP send response still in flight while the
+			// server already streams). Buffer the one-shot event; it is replayed
+			// once the row exists.
+			bufferPendingEvent(data);
+			return;
+		}
 
 		if (data.delta) {
 			// In-place mutation: the $state proxy already tracks it, so no
@@ -1144,6 +1203,7 @@
 							: [result.assistant_message];
 						allMessages = [...allMessages, ...newMessages];
 						currentMessageId = result.message_id;
+						flushPendingEvents(chatId, result.message_id);
 					}
 				} catch (e) {
 					console.error('[chat] send (queue) error', e);
@@ -1191,6 +1251,11 @@
 
 			// Swap optimistic temp msg with real messages from backend.
 			chatId = result.chat_id;
+			// While this chat's id was unknown (new chat), events from other
+			// tabs' streams may have been buffered. Discard those.
+			for (const cid of [...pendingEventsByChat.keys()]) {
+				if (cid !== result.chat_id) pendingEventsByChat.delete(cid);
+			}
 			const withoutTemp = allMessages.filter((m) => m.id !== tempId);
 			if (result.user_message && result.assistant_message) {
 				allMessages = [...withoutTemp, result.user_message, result.assistant_message];
@@ -1198,6 +1263,8 @@
 				allMessages = [...withoutTemp, result.assistant_message];
 			}
 			currentMessageId = result.message_id;
+			// Replay one-shot deltas that arrived before the row was appended.
+			flushPendingEvents(result.chat_id, result.message_id);
 
 			if (isNew && tabId) {
 				updateTab(tabId, result.chat_id, text.slice(0, 40) || $t('chat.fallbackTitle'));
@@ -1483,6 +1550,7 @@
 			if (result.assistant_message) {
 				allMessages = [...allMessages, result.assistant_message];
 				currentMessageId = result.message_id;
+				flushPendingEvents(chatId, result.message_id);
 			}
 		} catch (e) {
 			console.error('[chat] regenerate error', e);
@@ -1526,6 +1594,7 @@
 				if (result.user_message && result.assistant_message) {
 					allMessages = [...allMessages, result.user_message, result.assistant_message];
 					currentMessageId = result.message_id;
+					flushPendingEvents(chatId, result.message_id);
 				}
 			} catch (e) {
 				console.error('[chat] edit-send error', e);
