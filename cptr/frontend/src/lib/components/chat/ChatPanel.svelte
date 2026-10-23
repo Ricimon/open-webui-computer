@@ -320,6 +320,7 @@
 		tick().then(() => {
 			if (messagesEl) {
 				const newScrollHeight = messagesEl.scrollHeight;
+				programmaticScroll = true;
 				messagesEl.scrollTop += newScrollHeight - prevScrollHeight;
 			}
 			loadingMore = false;
@@ -455,10 +456,14 @@
 		if (savedScroll >= 0 && !autoScroll) {
 			await tick();
 			if (messagesEl) {
+				programmaticScroll = true;
 				messagesEl.scrollTop = savedScroll;
 				// Also restore after rAF to beat any competing scroll operations
 				requestAnimationFrame(() => {
-					if (messagesEl) messagesEl.scrollTop = savedScroll;
+					if (messagesEl) {
+						programmaticScroll = true;
+						messagesEl.scrollTop = savedScroll;
+					}
 				});
 			}
 		}
@@ -677,15 +682,19 @@
 		if (!msg) return;
 
 		if (data.delta) {
+			// In-place mutation: the $state proxy already tracks it, so no
+			// array reassignment is needed. Bump contentVersion to drive the
+			// auto-scroll pin.
 			msg.content += data.delta;
-			allMessages = [...allMessages];
+			contentVersion++;
 			handleTtsDelta(data.message_id, data.delta);
 		}
 		if (data.reasoning_delta) {
 			// Compact per-token reasoning delta: the client receives only the
 			// new text instead of the full (potentially multi-MB) item on every
 			// token. The completed item still arrives as a full `output` event
-			// and replaces this in-progress item.
+			// and replaces this in-progress item. Mutations are in-place (the
+			// $state proxy tracks them); contentVersion drives the scroll pin.
 			const rd = data.reasoning_delta;
 			const field = rd.field === 'summary' ? 'summary' : 'content';
 			const arr = msg.output ?? (msg.output = []);
@@ -716,8 +725,7 @@
 			const block: any = blocks[blocks.length - 1];
 			if (typeof block.text !== 'string') block.text = '';
 			block.text += rd.text ?? '';
-			msg.output = [...arr];
-			allMessages = [...allMessages];
+			contentVersion++;
 		}
 		if (data.output) {
 			if (data.output.type === 'function_call') {
@@ -755,7 +763,7 @@
 			} else {
 				msg.output = [...existing, data.output];
 			}
-			allMessages = [...allMessages];
+			contentVersion++;
 		}
 		if (data.error) {
 			toast.error(data.error, { duration: 8000 });
@@ -781,10 +789,10 @@
 			// the DB reload returns. This avoids a transient blank message if the
 			// final `done` socket event beats the commit/read path.
 			msg.done = true;
+			contentVersion++;
 			if (chatTasks.some((task) => task.status === 'pending' || task.status === 'in_progress')) {
 				setChatTasks([]);
 			}
-			allMessages = [...allMessages];
 			loadChat(data.chat_id);
 		}
 	}
@@ -961,12 +969,24 @@
 
 	// ── Auto-scroll ─────────────────────────────────────────────
 
+	// Bumped whenever visible message content changes (streaming deltas,
+	// new output items, message completion). Drives the bottom-pin without
+	// relying on allMessages identity: in-place $state mutations are already
+	// reactive, and the O(n) tree-walk deriveds no longer re-run per token.
+	let contentVersion = $state(0);
+
+	// Set whenever we assign scrollTop ourselves, so the scroll handler can
+	// ignore the resulting scroll event.
+	let programmaticScroll = false;
+
 	function scrollToBottom() {
 		if (!messagesEl) return;
+		programmaticScroll = true;
 		messagesEl.scrollTop = messagesEl.scrollHeight;
 		// Follow-up scroll to account for content-visibility re-layouts
 		requestAnimationFrame(() => {
-			if (messagesEl) {
+			if (messagesEl && autoScroll) {
+				programmaticScroll = true;
 				messagesEl.scrollTop = messagesEl.scrollHeight;
 			}
 		});
@@ -976,23 +996,41 @@
 
 	function handleMessagesScroll() {
 		if (!messagesEl) return;
-		const { scrollTop, scrollHeight, clientHeight } = messagesEl;
+		const { scrollTop } = messagesEl;
+
+		// Ignore scrolls we caused ourselves: our own pinning must not
+		// re-engage auto-scroll (which previously made it impossible to
+		// scroll up during streaming), and skipping the
+		// scrollHeight/clientHeight reads avoids a forced layout on every
+		// programmatic scroll event.
+		if (programmaticScroll) {
+			programmaticScroll = false;
+			lastScrollTop = scrollTop;
+			return;
+		}
 
 		// If the user scrolled upward, immediately disengage auto-scroll
 		if (scrollTop < lastScrollTop) {
 			autoScroll = false;
-		} else {
-			// Re-engage only when very close to the bottom
-			autoScroll = scrollHeight - scrollTop <= clientHeight + 200;
+			lastScrollTop = scrollTop;
+			return;
 		}
 
+		// Re-engage only when very close to the bottom
+		const { scrollHeight, clientHeight } = messagesEl;
+		autoScroll = scrollHeight - scrollTop <= clientHeight + 200;
 		lastScrollTop = scrollTop;
 	}
 
 	$effect(() => {
+		void contentVersion; // track per-token content growth
 		if (activePath.length && messagesEl && autoScroll) {
+			// Re-check inside the frame: the user may have scrolled up
+			// after this effect ran but before the rAF fired.
 			requestAnimationFrame(() => {
-				scrollToBottom();
+				if (autoScroll) {
+					scrollToBottom();
+				}
 			});
 		}
 	});
@@ -1353,7 +1391,7 @@
 		}
 
 		active.done = true;
-		allMessages = [...allMessages];
+		contentVersion++;
 
 		try {
 			await cancelTask(chatId, active.id);
@@ -1375,7 +1413,6 @@
 			if (call) {
 				call.status = approved ? 'queued' : 'rejected';
 				if (approved) call.approved = true;
-				allMessages = [...allMessages]; // trigger reactivity
 			}
 		}
 
@@ -1998,6 +2035,7 @@
 						<div bind:this={loadSentinelEl} class="h-1 w-full" aria-hidden="true"></div>
 					{/if}
 					{#each visiblePath as { msg, siblingIds, siblingIndex } (msg.id)}
+						<div class="chat-row">
 						{#if msg.role === 'user'}
 							<UserMessage
 								content={msg.content}
@@ -2029,6 +2067,7 @@
 								onapprove={handleApprove}
 							/>
 						{/if}
+						</div>
 					{/each}
 				</div>
 			</div>
@@ -2125,3 +2164,14 @@
 		}}
 	/>
 {/if}
+
+<style>
+	/* Off-screen message rows skip layout/paint (large conversations can
+	   have thousands of rows). Each row's real size is remembered after its
+	   first render (the `auto` intrinsic-size keyword), so the scroll
+	   estimate converges as the user navigates. */
+	.chat-row {
+		content-visibility: auto;
+		contain-intrinsic-size: auto 96px;
+	}
+</style>
