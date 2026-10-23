@@ -587,6 +587,7 @@
 		message_id?: string;
 		delta?: string;
 		output?: any;
+		reasoning_delta?: { id?: string; field?: string; text?: string };
 		tasks?: ChatTask[];
 		context_usage?: ContextUsage | null;
 		done?: boolean;
@@ -679,6 +680,44 @@
 			msg.content += data.delta;
 			allMessages = [...allMessages];
 			handleTtsDelta(data.message_id, data.delta);
+		}
+		if (data.reasoning_delta) {
+			// Compact per-token reasoning delta: the client receives only the
+			// new text instead of the full (potentially multi-MB) item on every
+			// token. The completed item still arrives as a full `output` event
+			// and replaces this in-progress item.
+			const rd = data.reasoning_delta;
+			const field = rd.field === 'summary' ? 'summary' : 'content';
+			const arr = msg.output ?? (msg.output = []);
+			let idx = arr.findIndex((o: any) => o.type === 'reasoning' && o.id === rd.id);
+			if (idx < 0) {
+				// Seed only the targeted field: the renderer shows
+				// `summary ?? content`, so an empty `summary` array would hide
+				// streaming `content` text.
+				arr.push({
+					type: 'reasoning',
+					id: rd.id,
+					status: 'in_progress',
+					[field]:
+						field === 'summary' ? [{ type: 'summary_text', text: '' }] : [{ type: 'text', text: '' }]
+				});
+				idx = arr.length - 1;
+			}
+			const item: any = arr[idx];
+			let blocks = item[field];
+			if (!Array.isArray(blocks) || blocks.length === 0) {
+				item[field] = [
+					field === 'summary' ? { type: 'summary_text', text: '' } : { type: 'text', text: '' }
+				];
+				blocks = item[field];
+			}
+			// Append to the last block so deltas land in the active part when
+			// full-snapshot `output` events (summary_part.added) interleave.
+			const block: any = blocks[blocks.length - 1];
+			if (typeof block.text !== 'string') block.text = '';
+			block.text += rd.text ?? '';
+			msg.output = [...arr];
+			allMessages = [...allMessages];
 		}
 		if (data.output) {
 			if (data.output.type === 'function_call') {

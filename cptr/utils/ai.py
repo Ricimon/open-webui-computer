@@ -748,7 +748,15 @@ async def stream_openai_completions(
                                 reasoning_item = _reasoning_output_item()
                             reasoning_item["content"][0]["text"] = reasoning_buffer
                             emitted = True
-                            yield {"type": "output", "item": copy.deepcopy(reasoning_item)}
+                            # Stream a compact delta instead of the full (potentially
+                            # multi-MB) item on every token. The completed item is
+                            # still emitted before text/tool calls/usage/end-of-stream.
+                            yield {
+                                "type": "reasoning_delta",
+                                "item_id": reasoning_item["id"],
+                                "field": "content",
+                                "text": reasoning_delta,
+                            }
 
                         if delta.get("content"):
                             item = complete_reasoning_item()
@@ -1077,7 +1085,12 @@ async def stream_openai_responses(
                                 content[0]["type"] = content[0].get("type") or "text"
                                 content[0]["text"] = f"{content[0].get('text', '')}{delta}"
                             emitted = True
-                            yield {"type": "output", "item": copy.deepcopy(item)}
+                            yield {
+                                "type": "reasoning_delta",
+                                "item_id": item["id"],
+                                "field": "content",
+                                "text": delta,
+                            }
 
                         elif etype == "response.reasoning_summary_text.delta":
                             item = get_reasoning_item(event)
@@ -1091,7 +1104,12 @@ async def stream_openai_responses(
                                 summary[0]["type"] = summary[0].get("type") or "summary_text"
                                 summary[0]["text"] = f"{summary[0].get('text', '')}{delta}"
                             emitted = True
-                            yield {"type": "output", "item": copy.deepcopy(item)}
+                            yield {
+                                "type": "reasoning_delta",
+                                "item_id": item["id"],
+                                "field": "summary",
+                                "text": delta,
+                            }
 
                         elif etype == "response.reasoning_summary_part.added":
                             item = get_reasoning_item(event)
