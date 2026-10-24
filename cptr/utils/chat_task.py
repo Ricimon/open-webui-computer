@@ -45,7 +45,6 @@ from cptr.socket.main import emit_to_user
 from cptr.utils.ai import (
     _STREAM_TIMEOUT,
     ChatCompletionForm,
-    _reasoning_output_item,
     generate_json,
     stream_anthropic,
     stream_openai_completions,
@@ -1497,8 +1496,6 @@ async def run_chat_task(
                 await output_queue.put({"type": "delta", "content": data["delta"]})
             elif "output" in data:
                 await output_queue.put({"type": "output", "item": data["output"]})
-            elif "reasoning_delta" in data:
-                await output_queue.put({"type": "reasoning_delta", **data["reasoning_delta"]})
             elif data.get("done"):
                 if "error" in data:
                     await output_queue.put({"type": "error", "message": data["error"]})
@@ -1767,15 +1764,7 @@ async def run_chat_task(
                         "content": [{"type": "reasoning_text", "text": event.text}],
                     }
                 _upsert_output_item(output_items, item)
-                # Forward the compact delta; the completed item is emitted by
-                # _finish_reasoning_item when the reasoning section ends.
-                await emit(
-                    reasoning_delta={
-                        "id": item["id"],
-                        "field": "content",
-                        "text": event.text,
-                    }
-                )
+                await emit(output=item)
                 _sync_state()
             elif isinstance(event, AgentToolUpdate):
                 await _finish_reasoning_item()
@@ -2454,37 +2443,6 @@ async def run_chat_task(
                         continue
                     pending_call_ids.add(call_id)
                     pending_calls.append(event)
-
-                elif event["type"] == "reasoning_delta":
-                    # Compact per-token reasoning delta. Accumulate into the local
-                    # output item (DB source of truth) and forward the small delta
-                    # to the client instead of the full multi-MB item.
-                    item_id = event.get("item_id") or ""
-                    field = "summary" if event.get("field") == "summary" else "content"
-                    text = event.get("text") or ""
-                    item = next(
-                        (
-                            it
-                            for it in output_items
-                            if it.get("type") == "reasoning" and it.get("id") == item_id
-                        ),
-                        None,
-                    )
-                    if item is None:
-                        item = _reasoning_output_item()
-                        item["id"] = item_id
-                        output_items.append(item)
-                    block_type = "summary_text" if field == "summary" else "text"
-                    blocks = item.get(field)
-                    if not isinstance(blocks, list) or not isinstance(blocks[0], dict):
-                        blocks = [{"type": block_type, "text": ""}]
-                        item[field] = blocks
-                    blocks[0]["text"] = f"{blocks[0].get('text', '')}{text}"
-                    streamed_reasoning_chars = max(
-                        streamed_reasoning_chars, _reasoning_text_len(item)
-                    )
-                    _sync_state()
-                    await emit(reasoning_delta={"id": item_id, "field": field, "text": text})
 
                 elif event["type"] in ("output", "reasoning"):
                     # Providers stream normalized Responses-style output items.
