@@ -658,7 +658,7 @@
 	"chat.exploring": "探索中",
 	"chat.explored": "探索済み",
 	"chat.compacted": "コンテキストが圧縮されました：この時点以前のメッセージは要約されました",
-	"chat.compactedSummary": "概要：",
+	"chat.compactionSummary": "圧縮サマリー",
 	"chat.allow": "許可",
 	"chat.deny": "拒否",
 	"chat.toolInput": "入力",

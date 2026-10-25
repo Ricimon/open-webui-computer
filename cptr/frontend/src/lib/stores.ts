@@ -340,6 +340,8 @@ export const updateAvailable = derived([appVersion, latestVersion], ([$app, $lat
 export const showChangelog = writable(false);
 export const showUpdateToastPref = writable(true);
 export const showSearch = writable(false);
+// Non-null: the compaction summary window is open with this markdown summary.
+export const compactionSummaryOpen = writable<string | null>(null);
 export const stateLoaded = writable(false);
 export type GitReviewTarget = { kind: 'local' } | { kind: 'pr'; number: number };
 export const gitReviewOpen = writable<GitReviewTarget | null>(null);

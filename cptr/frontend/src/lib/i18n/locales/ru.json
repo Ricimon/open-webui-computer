@@ -658,7 +658,7 @@
 	"chat.exploring": "Исследование",
 	"chat.explored": "Исследовано",
 	"chat.compacted": "Контекст сжат: сообщения до этой точки резюмированы",
-	"chat.compactedSummary": "Резюме:",
+	"chat.compactionSummary": "Резюме сжатия",
 	"chat.allow": "Разрешить",
 	"chat.deny": "Отклонить",
 	"chat.toolInput": "Ввод",

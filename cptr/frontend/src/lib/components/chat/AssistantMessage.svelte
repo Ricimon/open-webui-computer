@@ -8,9 +8,9 @@
 	import MessageTimestamp from './MessageTimestamp.svelte';
 	import ReasoningCollapsible from './ReasoningCollapsible.svelte';
 	import ToolCallCollapsible from './ToolCallCollapsible.svelte';
-	import { currentWorkspace, openFileTab } from '$lib/stores';
+	import { compactionSummaryOpen, currentWorkspace, openFileTab } from '$lib/stores';
 	import { ttsConfigured, ttsEnabled } from '$lib/stores/audio';
-	import { tooltip, summaryTooltip } from '$lib/tooltip';
+	import { tooltip } from '$lib/tooltip';
 	import { fileIconName } from '$lib/utils/fileIcon';
 	import Icon from '../Icon.svelte';
 	import { t } from '$lib/i18n';
@@ -406,13 +406,11 @@
 		);
 	});
 
-	// Compaction indicator tooltip: base label plus the chat summary attached
-	// to this message. Every compaction icon on the message (message-level,
-	// group header, activity rows) shows it; the summary text is escaped by
-	// summaryTooltip.
-	const compactedTooltip = $derived(
-		summaryTooltip($t('chat.compacted'), $t('chat.compactedSummary'), compactedSummary)
-	);
+	// Clicking a compaction icon opens the in-page summary window (rendered
+	// at the layout level); hover only shows the plain label tooltip.
+	function openCompaction() {
+		if (compactedSummary) compactionSummaryOpen.set(compactedSummary);
+	}
 
 	/** Format usage data for tooltip display */
 	function formatUsageLabel(key: string): string {
@@ -482,13 +480,15 @@
 			{:else}
 				{#if done && displayItems.length === 0 && content}
 					{#if compacted && responseStartsWithText}
-						<div
-							class="float-left mr-1 mt-1 text-sky-500 dark:text-sky-400"
+						<button
+							type="button"
+							class="float-left mr-1 mt-1 text-sky-500 dark:text-sky-400 cursor-pointer"
 							aria-label={$t('chat.compacted')}
-							use:tooltip={compactedTooltip}
+							use:tooltip={$t('chat.compacted')}
+							onclick={openCompaction}
 						>
 							<Icon name="archive" size={14} />
-						</div>
+						</button>
 					{/if}
 					<MarkdownRenderer {content} />
 				{/if}
@@ -497,13 +497,15 @@
 						{@const messageText = stripStructuredImageMarkdown(messageItemText(displayItem.item))}
 						{#if messageText}
 							{#if groupIdx === 0 && compacted}
-								<div
-									class="float-left mr-1 mt-1 text-sky-500 dark:text-sky-400"
+								<button
+									type="button"
+									class="float-left mr-1 mt-1 text-sky-500 dark:text-sky-400 cursor-pointer"
 									aria-label={$t('chat.compacted')}
-									use:tooltip={compactedTooltip}
+									use:tooltip={$t('chat.compacted')}
+									onclick={openCompaction}
 								>
 									<Icon name="archive" size={14} />
-								</div>
+								</button>
 							{/if}
 							<MarkdownRenderer content={messageText} />
 						{/if}

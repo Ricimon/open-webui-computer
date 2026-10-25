@@ -10,6 +10,7 @@
 	import GitBar from '$lib/components/GitBar.svelte';
 	import SearchModal from '$lib/components/SearchModal.svelte';
 	import SettingsModal from '$lib/components/SettingsModal.svelte';
+	import CompactionSummaryModal from '$lib/components/chat/CompactionSummaryModal.svelte';
 	import AuthScreen from '$lib/components/AuthScreen.svelte';
 	import ChangelogModal from '$lib/components/ChangelogModal.svelte';
 	import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
@@ -32,7 +33,8 @@
 		updateAvailable,
 		showChangelog,
 		showSearch,
-		showUpdateToastPref
+		showUpdateToastPref,
+		compactionSummaryOpen
 	} from '$lib/stores';
 	import { matchKeybinding, executeAction } from '$lib/stores/keybindings';
 	import { systemEvents } from '$lib/stores/systemEvents.svelte';
@@ -516,6 +518,12 @@
 		/>
 	{/if}
 	<ChangelogModal />
+	{#if $compactionSummaryOpen}
+		<CompactionSummaryModal
+			summary={$compactionSummaryOpen}
+			onclose={() => compactionSummaryOpen.set(null)}
+		/>
+	{/if}
 	{#if $updateAvailable && showUpdateToast}
 		<UpdateToast
 			onclose={() => {

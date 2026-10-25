@@ -2,7 +2,8 @@
 	import { slide } from 'svelte/transition';
 	import { quintOut } from 'svelte/easing';
 	import { t } from '$lib/i18n';
-	import { tooltip, summaryTooltip } from '$lib/tooltip';
+	import { compactionSummaryOpen } from '$lib/stores';
+	import { tooltip } from '$lib/tooltip';
 	import Icon from '../Icon.svelte';
 
 	interface Props {
@@ -28,6 +29,12 @@
 
 	function toggleExpanded() {
 		expanded = !expanded;
+	}
+
+	// Clicking the compaction icon opens the in-page summary window (rendered
+	// at the layout level); hover only shows the plain label tooltip.
+	function openCompaction() {
+		if (compactedSummary) compactionSummaryOpen.set(compactedSummary);
 	}
 </script>
 
@@ -57,14 +64,24 @@
 			</div>
 
 			{#if compacted}
+				<!-- role=button (not <button>): the header row is itself a <button> -->
 				<div
-					class="shrink-0 text-sky-500 dark:text-sky-400"
-					use:tooltip={summaryTooltip(
-						$t('chat.compacted'),
-						$t('chat.compactedSummary'),
-						compactedSummary
-					)}
+					role="button"
+					tabindex="0"
+					class="shrink-0 text-sky-500 dark:text-sky-400 cursor-pointer"
+					use:tooltip={$t('chat.compacted')}
 					aria-label={$t('chat.compacted')}
+					onclick={(e) => {
+						e.stopPropagation();
+						openCompaction();
+					}}
+					onkeydown={(e) => {
+						if (e.key === 'Enter' || e.key === ' ') {
+							e.preventDefault();
+							e.stopPropagation();
+							openCompaction();
+						}
+					}}
 				>
 					<Icon name="archive" size={14} />
 				</div>

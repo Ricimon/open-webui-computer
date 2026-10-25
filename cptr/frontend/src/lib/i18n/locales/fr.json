@@ -658,7 +658,7 @@
 	"chat.exploring": "Exploration",
 	"chat.explored": "Exploré",
 	"chat.compacted": "Contexte compacté : les messages avant ce point ont été résumés",
-	"chat.compactedSummary": "Résumé :",
+	"chat.compactionSummary": "Résumé de la compaction",
 	"chat.allow": "Autoriser",
 	"chat.deny": "Refuser",
 	"chat.toolInput": "Entrée",

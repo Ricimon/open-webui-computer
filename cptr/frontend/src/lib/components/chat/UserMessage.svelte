@@ -4,8 +4,8 @@
 	import MarkdownRenderer from '$lib/components/markdown/MarkdownRenderer.svelte';
 	import MessageTimestamp from './MessageTimestamp.svelte';
 	import { fileIconName } from '$lib/utils/fileIcon';
-	import { openFileTab, setFileBrowserCwd, setActiveTab } from '$lib/stores';
-	import { tooltip, summaryTooltip } from '$lib/tooltip';
+	import { compactionSummaryOpen, openFileTab, setFileBrowserCwd, setActiveTab } from '$lib/stores';
+	import { tooltip } from '$lib/tooltip';
 	import { t } from '$lib/i18n';
 
 	interface Props {
@@ -69,11 +69,11 @@
 	const delegationLabel = $derived(
 		delegationId || (delegationIds.length > 1 ? `${delegationIds.length} tasks` : '')
 	);
-	// Compaction indicator tooltip: base label plus the chat summary attached
-	// to this message; the summary text is escaped by summaryTooltip.
-	const compactedTooltip = $derived(
-		summaryTooltip($t('chat.compacted'), $t('chat.compactedSummary'), compactedSummary)
-	);
+	// Clicking the compaction icon opens the in-page summary window (rendered
+	// at the layout level); hover only shows the plain label tooltip.
+	function openCompaction() {
+		if (compactedSummary) compactionSummaryOpen.set(compactedSummary);
+	}
 	const asyncSummary = $derived.by(() => {
 		const line = content
 			.split('\n')
@@ -257,13 +257,15 @@
 		{/if}
 		<div class="flex justify-end items-start gap-1.5">
 			{#if compacted}
-				<div
-					class="shrink-0 text-sky-500 dark:text-sky-400"
+				<button
+					type="button"
+					class="shrink-0 text-sky-500 dark:text-sky-400 cursor-pointer"
 					aria-label={$t('chat.compacted')}
-					use:tooltip={compactedTooltip}
+					use:tooltip={$t('chat.compacted')}
+					onclick={openCompaction}
 				>
 					<Icon name="archive" size={14} />
-				</div>
+				</button>
 			{/if}
 			<div class="max-w-[90%] px-4 py-2 rounded-3xl app-interactive-active">
 				<div class="text-[0.8125rem] leading-relaxed text-gray-900 dark:text-gray-200 break-words">

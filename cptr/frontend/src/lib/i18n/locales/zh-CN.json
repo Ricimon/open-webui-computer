@@ -658,7 +658,7 @@
 	"chat.exploring": "探索中",
 	"chat.explored": "已探索",
 	"chat.compacted": "上下文已压缩：此点之前的消息已被摘要",
-	"chat.compactedSummary": "摘要:",
+	"chat.compactionSummary": "压缩摘要",
 	"chat.allow": "允许",
 	"chat.deny": "拒绝",
 	"chat.toolInput": "输入",
