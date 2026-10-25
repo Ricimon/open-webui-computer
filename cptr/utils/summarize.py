@@ -68,7 +68,7 @@ async def summarize_messages(
 
         # Summary generation must not spend tokens on reasoning. Models with
         # a thinking-by-default chat template would otherwise burn the
-        # 1000-token budget on reasoning (same treatment as title generation).
+        # 2000-token budget on reasoning (same treatment as title generation).
         result = await generate_text(
             None,
             model_id=await configured_utility_model("summary_generation"),
@@ -76,7 +76,7 @@ async def summarize_messages(
             active_model=model,
             messages=[{"role": "user", "content": text}],
             system=_get_summarize_prompt(),
-            max_tokens=1000,
+            max_tokens=2000,
             request_params={"chat_template_kwargs": {"enable_thinking": False}},
             timeout=_STREAM_TIMEOUT,
         )
