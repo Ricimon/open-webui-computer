@@ -356,7 +356,7 @@
 
 /* Tippy tooltip theme */
 .tippy-box[data-theme~='cptr'] {
-	@apply rounded-lg text-xs border shadow-xl;
+	@apply rounded-lg text-xs border shadow-xl whitespace-pre-line;
 	background: var(--app-bg);
 	color: var(--app-fg);
 	border-color: var(--app-border);

@@ -5,6 +5,8 @@
 	import { expandToolDetails } from '$lib/stores';
 	import ReasoningCollapsible from './ReasoningCollapsible.svelte';
 	import ToolCallCollapsible from './ToolCallCollapsible.svelte';
+	import { tooltip, summaryTooltip } from '$lib/tooltip';
+	import Icon from '../Icon.svelte';
 
 	interface Props {
 		entries: any[];
@@ -12,6 +14,8 @@
 		reasoning: any[];
 		outputs: Map<string, any>;
 		done: boolean;
+		compacted?: boolean;
+		compactedSummary?: string | null;
 		chatId: string | null;
 		messageId: string;
 		groupIdx: number;
@@ -25,6 +29,8 @@
 		reasoning,
 		outputs,
 		done,
+		compacted = false,
+		compactedSummary = null,
 		chatId,
 		messageId,
 		groupIdx,
@@ -181,6 +187,20 @@
 				</div>
 			{/if}
 
+			{#if compacted}
+				<div
+					class="shrink-0 text-sky-500 dark:text-sky-400"
+					use:tooltip={summaryTooltip(
+						$t('chat.compacted'),
+						$t('chat.compactedSummary'),
+						compactedSummary
+					)}
+					aria-label={$t('chat.compacted')}
+				>
+					<Icon name="archive" size={14} />
+				</div>
+			{/if}
+
 			<div class="flex-1 min-w-0 line-clamp-1">
 				<span class="text-gray-600 dark:text-gray-300">
 					{isThoughtOnly
@@ -216,7 +236,10 @@
 			<div class="mb-0.5 space-y-0.5 mt-1">
 				{#each entries as item, entryIdx}
 					{#if item.type === 'reasoning'}
-						<ReasoningCollapsible {item} fallbackId={`reasoning-${groupIdx}-${entryIdx}`} />
+						<ReasoningCollapsible
+							{item}
+							fallbackId={`reasoning-${groupIdx}-${entryIdx}`}
+						/>
 					{:else}
 						<ToolCallCollapsible
 							{item}

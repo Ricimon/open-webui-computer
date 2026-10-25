@@ -10,7 +10,7 @@
 	import ToolCallCollapsible from './ToolCallCollapsible.svelte';
 	import { currentWorkspace, openFileTab } from '$lib/stores';
 	import { ttsConfigured, ttsEnabled } from '$lib/stores/audio';
-	import { tooltip } from '$lib/tooltip';
+	import { tooltip, summaryTooltip } from '$lib/tooltip';
 	import { fileIconName } from '$lib/utils/fileIcon';
 	import Icon from '../Icon.svelte';
 	import { t } from '$lib/i18n';
@@ -20,6 +20,8 @@
 		meta?: Record<string, any> | null;
 		done: boolean;
 		output: any[] | null;
+		compacted?: boolean;
+		compactedSummary?: string | null;
 		usage: Record<string, number> | null;
 		chatId: string | null;
 		messageId: string;
@@ -39,6 +41,8 @@
 		meta = null,
 		done,
 		output,
+		compacted = false,
+		compactedSummary = null,
 		usage,
 		chatId,
 		messageId,
@@ -391,6 +395,25 @@
 		return items;
 	});
 
+	// Whether the visible response starts with assistant text, rather than an
+	// activity group (which already carries the compacted indicator on its header).
+	const responseStartsWithText = $derived.by((): boolean => {
+		if (displayItems.length === 0) return Boolean(content);
+		const first = displayItems[0];
+		return (
+			first.type === 'message_item' &&
+			Boolean(stripStructuredImageMarkdown(messageItemText(first.item)).trim())
+		);
+	});
+
+	// Compaction indicator tooltip: base label plus the chat summary attached
+	// to this message. Every compaction icon on the message (message-level,
+	// group header, activity rows) shows it; the summary text is escaped by
+	// summaryTooltip.
+	const compactedTooltip = $derived(
+		summaryTooltip($t('chat.compacted'), $t('chat.compactedSummary'), compactedSummary)
+	);
+
 	/** Format usage data for tooltip display */
 	function formatUsageLabel(key: string): string {
 		return key.replace(/_/g, ' ').replace(/\b\w/g, (l) => l.toUpperCase());
@@ -458,12 +481,30 @@
 				></span>
 			{:else}
 				{#if done && displayItems.length === 0 && content}
+					{#if compacted && responseStartsWithText}
+						<div
+							class="float-left mr-1 mt-1 text-sky-500 dark:text-sky-400"
+							aria-label={$t('chat.compacted')}
+							use:tooltip={compactedTooltip}
+						>
+							<Icon name="archive" size={14} />
+						</div>
+					{/if}
 					<MarkdownRenderer {content} />
 				{/if}
 				{#each displayItems as displayItem, groupIdx}
 					{#if displayItem.type === 'message_item'}
 						{@const messageText = stripStructuredImageMarkdown(messageItemText(displayItem.item))}
 						{#if messageText}
+							{#if groupIdx === 0 && compacted}
+								<div
+									class="float-left mr-1 mt-1 text-sky-500 dark:text-sky-400"
+									aria-label={$t('chat.compacted')}
+									use:tooltip={compactedTooltip}
+								>
+									<Icon name="archive" size={14} />
+								</div>
+							{/if}
 							<MarkdownRenderer content={messageText} />
 						{/if}
 					{:else if displayItem.type === 'artifact_item'}
@@ -562,7 +603,12 @@
 						{#if displayItem.entries.length === 1}
 							{@const item = displayItem.entries[0]}
 							{#if item.type === 'reasoning'}
-								<ReasoningCollapsible {item} fallbackId={`reasoning-${groupIdx}-0`} />
+								<ReasoningCollapsible
+									{item}
+									fallbackId={`reasoning-${groupIdx}-0`}
+									compacted={groupIdx === 0 && compacted}
+									{compactedSummary}
+								/>
 							{:else}
 								<ToolCallCollapsible
 									{item}
@@ -572,6 +618,8 @@
 									{messageId}
 									{toolLabel}
 									{onapprove}
+									compacted={groupIdx === 0 && compacted}
+									{compactedSummary}
 								/>
 							{/if}
 						{:else}
@@ -581,11 +629,13 @@
 								reasoning={displayItem.reasoning}
 								outputs={displayItem.outputs}
 								{done}
+								compacted={groupIdx === 0 && compacted}
 								{chatId}
 								{messageId}
 								{groupIdx}
 								{toolLabel}
 								{onapprove}
+								{compactedSummary}
 							/>
 						{/if}
 					{/if}

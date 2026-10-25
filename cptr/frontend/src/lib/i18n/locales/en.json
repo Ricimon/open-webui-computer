@@ -748,6 +748,8 @@
 	"chat.artifact": "Artifact",
 	"chat.exploring": "Exploring",
 	"chat.explored": "Explored",
+	"chat.compacted": "Context compacted: messages before this point were summarized",
+	"chat.compactedSummary": "Summary:",
 	"chat.allow": "Allow",
 	"chat.deny": "Deny",
 	"chat.toolInput": "Input",

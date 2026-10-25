@@ -3,6 +3,8 @@
 	import { quintOut } from 'svelte/easing';
 	import { t } from '$lib/i18n';
 	import { expandToolDetails } from '$lib/stores';
+	import { tooltip, summaryTooltip } from '$lib/tooltip';
+	import Icon from '../Icon.svelte';
 
 	interface Props {
 		item: any;
@@ -12,9 +14,21 @@
 		messageId: string;
 		toolLabel: (name: string, args: any) => string;
 		onapprove: (messageId: string, callId: string, approved: boolean) => void;
+		compacted?: boolean;
+		compactedSummary?: string | null;
 	}
 
-	let { item, pairedOutput, done, chatId, messageId, toolLabel, onapprove }: Props = $props();
+	let {
+		item,
+		pairedOutput,
+		done,
+		chatId,
+		messageId,
+		toolLabel,
+		onapprove,
+		compacted = false,
+		compactedSummary = null
+	}: Props = $props();
 
 	let expanded = $state($expandToolDetails || item.name === 'ask_user');
 	$effect(() => {
@@ -172,6 +186,20 @@
 							d="M21.75 6.75a4.5 4.5 0 0 1-4.884 4.484c-1.076-.091-2.264.071-2.95.904l-7.152 8.684a2.548 2.548 0 1 1-3.586-3.586l8.684-7.152c.833-.686.995-1.874.904-2.95a4.5 4.5 0 0 1 6.336-4.486l-3.276 3.276a3.004 3.004 0 0 0 2.25 2.25l3.276-3.276c.256.565.398 1.192.398 1.852Z"
 						/>
 					</svg>
+				</div>
+			{/if}
+
+			{#if compacted}
+				<div
+					class="shrink-0 text-sky-500 dark:text-sky-400"
+					use:tooltip={summaryTooltip(
+						$t('chat.compacted'),
+						$t('chat.compactedSummary'),
+						compactedSummary
+					)}
+					aria-label={$t('chat.compacted')}
+				>
+					<Icon name="archive" size={14} />
 				</div>
 			{/if}
 

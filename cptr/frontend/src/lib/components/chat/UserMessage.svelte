@@ -5,13 +5,15 @@
 	import MessageTimestamp from './MessageTimestamp.svelte';
 	import { fileIconName } from '$lib/utils/fileIcon';
 	import { openFileTab, setFileBrowserCwd, setActiveTab } from '$lib/stores';
-	import { tooltip } from '$lib/tooltip';
+	import { tooltip, summaryTooltip } from '$lib/tooltip';
 	import { t } from '$lib/i18n';
 
 	interface Props {
 		content: string;
 		meta?: Record<string, any> | null;
 		createdAt?: number | null;
+		compacted?: boolean;
+		compactedSummary?: string | null;
 		siblingIndex?: number;
 		siblingTotal?: number;
 		onedit?: (content: string, submit: boolean) => void;
@@ -21,6 +23,8 @@
 		content,
 		meta = null,
 		createdAt = null,
+		compacted = false,
+		compactedSummary = null,
 		siblingIndex = 0,
 		siblingTotal = 1,
 		onedit,
@@ -64,6 +68,11 @@
 	const delegationIds = $derived(Array.isArray(meta?.delegation_ids) ? meta.delegation_ids : []);
 	const delegationLabel = $derived(
 		delegationId || (delegationIds.length > 1 ? `${delegationIds.length} tasks` : '')
+	);
+	// Compaction indicator tooltip: base label plus the chat summary attached
+	// to this message; the summary text is escaped by summaryTooltip.
+	const compactedTooltip = $derived(
+		summaryTooltip($t('chat.compacted'), $t('chat.compactedSummary'), compactedSummary)
 	);
 	const asyncSummary = $derived.by(() => {
 		const line = content
@@ -246,7 +255,16 @@
 				{/each}
 			</div>
 		{/if}
-		<div class="flex justify-end">
+		<div class="flex justify-end items-start gap-1.5">
+			{#if compacted}
+				<div
+					class="shrink-0 text-sky-500 dark:text-sky-400"
+					aria-label={$t('chat.compacted')}
+					use:tooltip={compactedTooltip}
+				>
+					<Icon name="archive" size={14} />
+				</div>
+			{/if}
 			<div class="max-w-[90%] px-4 py-2 rounded-3xl app-interactive-active">
 				<div class="text-[0.8125rem] leading-relaxed text-gray-900 dark:text-gray-200 break-words">
 					{#each parsedContent as segment}{#if segment.type === 'text'}<MarkdownRenderer

@@ -657,6 +657,8 @@
 	"chat.artifact": "아티팩트",
 	"chat.exploring": "탐색 중",
 	"chat.explored": "탐색 완료",
+	"chat.compacted": "컨텍스트가 압축되었습니다: 이 지점 이전의 메시지는 요약되었습니다",
+	"chat.compactedSummary": "요약:",
 	"chat.allow": "허용",
 	"chat.deny": "거부",
 	"chat.toolInput": "입력",

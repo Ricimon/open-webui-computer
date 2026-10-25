@@ -699,6 +699,8 @@ def _message_dict(m) -> dict:
         "output": m.output,
         "usage": m.usage,
         "meta": m.meta,
+        "compacted": bool(m.chat_summary),
+        "chat_summary": m.chat_summary,
         "created_at": m.created_at,
     }
     live = get_live_state(m.id)

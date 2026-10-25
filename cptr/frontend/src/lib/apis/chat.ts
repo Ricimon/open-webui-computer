@@ -13,6 +13,7 @@ export interface ChatMessageRow {
 	output: any[] | null;
 	usage: Record<string, number> | null;
 	meta: Record<string, any> | null;
+	compacted?: boolean;
 	created_at: number;
 }
 

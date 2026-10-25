@@ -657,6 +657,8 @@
 	"chat.artifact": "成品",
 	"chat.exploring": "探索中",
 	"chat.explored": "已探索",
+	"chat.compacted": "上下文已壓縮：此點之前的訊息已被摘要",
+	"chat.compactedSummary": "摘要:",
 	"chat.allow": "允許",
 	"chat.deny": "拒絕",
 	"chat.toolInput": "輸入",

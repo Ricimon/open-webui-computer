@@ -2,13 +2,17 @@
 	import { slide } from 'svelte/transition';
 	import { quintOut } from 'svelte/easing';
 	import { t } from '$lib/i18n';
+	import { tooltip, summaryTooltip } from '$lib/tooltip';
+	import Icon from '../Icon.svelte';
 
 	interface Props {
 		item: any;
 		fallbackId: string;
+		compacted?: boolean;
+		compactedSummary?: string | null;
 	}
 
-	let { item, fallbackId }: Props = $props();
+	let { item, fallbackId, compacted = false, compactedSummary = null }: Props = $props();
 
 	let expanded = $state(false);
 
@@ -51,6 +55,20 @@
 					/>
 				</svg>
 			</div>
+
+			{#if compacted}
+				<div
+					class="shrink-0 text-sky-500 dark:text-sky-400"
+					use:tooltip={summaryTooltip(
+						$t('chat.compacted'),
+						$t('chat.compactedSummary'),
+						compactedSummary
+					)}
+					aria-label={$t('chat.compacted')}
+				>
+					<Icon name="archive" size={14} />
+				</div>
+			{/if}
 
 			<div class="flex-1 min-w-0 line-clamp-1">
 				<span class="font-normal">

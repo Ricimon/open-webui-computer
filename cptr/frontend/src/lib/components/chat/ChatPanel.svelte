@@ -1997,37 +1997,41 @@
 					{/if}
 					{#each visiblePath as { msg, siblingIds, siblingIndex } (msg.id)}
 						<div class="chat-row">
-						{#if msg.role === 'user'}
-							<UserMessage
-								content={msg.content}
-								meta={msg.meta}
-								createdAt={msg.created_at}
-								{siblingIndex}
-								siblingTotal={siblingIds.length}
-								onnavigate={(dir) => handleNavigate(msg.id, dir)}
-								onedit={(c, submit) => handleEditMessage(msg.id, c, null, submit)}
-							/>
-						{:else}
-							<AssistantMessage
-								content={msg.content}
-								meta={msg.meta}
-								done={msg.done}
-								output={msg.output}
-								usage={msg.usage}
-								{chatId}
-								messageId={msg.id}
-								createdAt={msg.created_at}
-								{siblingIndex}
-								siblingTotal={siblingIds.length}
-								speaking={speakingMessageId === msg.id}
-								onnavigate={(dir) => handleNavigate(msg.id, dir)}
-								onfork={sending || streaming ? undefined : () => handleForkChat(msg.id)}
-								onregenerate={() => handleRegenerate(msg.id)}
-								onedit={(c, o, submit) => handleEditMessage(msg.id, c, o, submit)}
-								onspeak={() => speakMessage(msg.id)}
-								onapprove={handleApprove}
-							/>
-						{/if}
+							{#if msg.role === 'user'}
+								<UserMessage
+									content={msg.content}
+									meta={msg.meta}
+									createdAt={msg.created_at}
+									compacted={msg.compacted}
+									compactedSummary={msg.chat_summary}
+									{siblingIndex}
+									siblingTotal={siblingIds.length}
+									onnavigate={(dir) => handleNavigate(msg.id, dir)}
+									onedit={(c, submit) => handleEditMessage(msg.id, c, null, submit)}
+								/>
+							{:else}
+								<AssistantMessage
+									content={msg.content}
+									meta={msg.meta}
+									done={msg.done}
+									output={msg.output}
+									compacted={msg.compacted}
+									compactedSummary={msg.chat_summary}
+									usage={msg.usage}
+									{chatId}
+									messageId={msg.id}
+									createdAt={msg.created_at}
+									{siblingIndex}
+									siblingTotal={siblingIds.length}
+									speaking={speakingMessageId === msg.id}
+									onnavigate={(dir) => handleNavigate(msg.id, dir)}
+									onfork={sending || streaming ? undefined : () => handleForkChat(msg.id)}
+									onregenerate={() => handleRegenerate(msg.id)}
+									onedit={(c, o, submit) => handleEditMessage(msg.id, c, o, submit)}
+									onspeak={() => speakMessage(msg.id)}
+									onapprove={handleApprove}
+								/>
+							{/if}
 						</div>
 					{/each}
 				</div>

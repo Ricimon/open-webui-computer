@@ -657,6 +657,8 @@
 	"chat.artifact": "Artefacto",
 	"chat.exploring": "Explorando",
 	"chat.explored": "Explorado",
+	"chat.compacted": "Contexto compactado: los mensajes anteriores a este punto fueron resumidos",
+	"chat.compactedSummary": "Resumen:",
 	"chat.allow": "Permitir",
 	"chat.deny": "Denegar",
 	"chat.toolInput": "Entrada",
