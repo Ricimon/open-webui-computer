@@ -13,8 +13,7 @@ Changes compared to upstream:
 - Messages with a compacted summary on them will now show an icon that when clicked, displays the summary contents.
 - GitBar information loading is taken off the main thread so that it doesn't block main chat UI loading.
 - Add reasoning level configuration to the chat Plus menu.
-- Add compaction keep-percent to the chat Plus menu, customizes what percentage of past messages are compacted.
-- Add compaction token threshold to the chat Plus menu, overrides when auto-compaction triggers for the chat.
+- Add compaction token threshold and keep-percent to the chat Plus menu; keep-percent customizes what percentage of past messages are compacted.
 - Response completion audio plays even when chat tab is focused.
 - Chat title is now editable.
 - Chat tabs now scroll horizontally when extended beyond horizontal bounds.
