@@ -187,7 +187,7 @@
 	// A "turn" is a user+assistant message pair, so 6 turns = 12 messages.
 
 	const TURNS_PER_PAGE = 6;
-	const MESSAGES_PER_PAGE = TURNS_PER_PAGE * 2; // user + assistant
+	const MESSAGES_PER_PAGE = TURNS_PER_PAGE * 2; // user + assistant display units
 	let visibleCount = $state(MESSAGES_PER_PAGE);
 
 	// Reset visible window when chat changes
@@ -299,10 +299,107 @@
 	});
 	const activePathIds = $derived(new Set(activePath.map(({ msg }) => msg.id)));
 
-	// ── Visible slice of the active path ────────────────────────
-	const hasHiddenMessages = $derived(activePath.length > visibleCount);
-	const visiblePath = $derived(
-		hasHiddenMessages ? activePath.slice(activePath.length - visibleCount) : activePath
+
+	// ── Step-row display units ───────────────────────────────────
+	// Agentic tasks create one assistant row per LLM step, chained via
+	// parent_id under a shared meta.task_root. Display collapses each series
+	// into a single visible message (merged output in chain order); the raw
+	// rows stay intact for fork/edit/approve targeting.
+
+	interface DisplayUnit {
+		id: string; // first row id (stable key + sibling-nav anchor)
+		role: 'user' | 'assistant';
+		rows: ChatMessageRow[];
+		content: string;
+		output: any[] | null;
+		done: boolean;
+		usage: Record<string, number> | null;
+		compacted: boolean;
+		compactedSummary: string | null;
+		compactedRowId: string | null;
+		multiStep: boolean;
+		createdAt?: number | null;
+		siblingIds: string[];
+		siblingIndex: number;
+	}
+
+	function seriesRootOf(msg: ChatMessageRow): string {
+		const root = msg.meta?.task_root;
+		return typeof root === 'string' && root ? root : msg.id;
+	}
+
+	// A row continues the previous unit when it is an assistant step row
+	// chained directly after the unit's last row in the same series.
+	function continuesUnit(prev: ChatMessageRow, next: ChatMessageRow): boolean {
+		if (next.role !== 'assistant' || prev.role !== 'assistant') return false;
+		if (next.parent_id !== prev.id) return false;
+		const root = next.meta?.task_root;
+		if (typeof root !== 'string' || !root) return false;
+		return seriesRootOf(prev) === root;
+	}
+
+	function mergeUnitUsage(rows: ChatMessageRow[]): Record<string, number> | null {
+		const acc: Record<string, number> = {};
+		for (const r of rows) {
+			for (const [k, v] of Object.entries(r.usage ?? {})) {
+				if (typeof v === 'number') acc[k] = (acc[k] ?? 0) + v;
+			}
+		}
+		return Object.keys(acc).length ? acc : null;
+	}
+
+	function buildDisplayUnits(entries: PathEntry[]): DisplayUnit[] {
+		const units: DisplayUnit[] = [];
+		for (const entry of entries) {
+			const msg = entry.msg;
+			const prev = units.length ? units[units.length - 1] : null;
+			if (msg.role === 'assistant' && prev?.role === 'assistant' && continuesUnit(prev.rows[prev.rows.length - 1], msg)) {
+				prev.rows.push(msg);
+				continue;
+			}
+			units.push({
+				id: msg.id,
+				role: msg.role,
+				rows: [msg],
+				content: msg.content,
+				output: msg.output ?? null,
+				done: msg.done,
+				usage: msg.usage,
+				compacted: Boolean(msg.compacted),
+				compactedSummary: msg.chat_summary ?? null,
+				compactedRowId: null,
+				multiStep: false,
+				createdAt: msg.created_at ?? null,
+				siblingIds: entry.siblingIds,
+				siblingIndex: entry.siblingIndex
+			});
+		}
+
+		for (const unit of units) {
+			if (unit.role !== 'assistant' || unit.rows.length < 2) continue;
+			unit.multiStep = true;
+			unit.content = unit.rows.map((r) => r.content ?? '').join('');
+			// Tag each item with its source row so the compaction icon can
+			// anchor mid-series and tool approval routes to the owning row.
+			unit.output = unit.rows.flatMap((r) => (r.output ?? []).map((item: any) => ({ ...item, _rowId: r.id })));
+			unit.done = unit.rows[unit.rows.length - 1].done;
+			unit.usage = mergeUnitUsage(unit.rows);
+			const summaryRows = unit.rows.filter((r) => r.chat_summary);
+			if (summaryRows.length) {
+				unit.compacted = true;
+				unit.compactedSummary = summaryRows[summaryRows.length - 1].chat_summary ?? null;
+				unit.compactedRowId = summaryRows[summaryRows.length - 1].id;
+			}
+		}
+		return units;
+	}
+
+	// Windowed rendering operates on display units, so a merged multi-step
+	// series counts as one message (preserving the "N turns" intent).
+	const allUnits = $derived(buildDisplayUnits(activePath));
+	const hasHiddenMessages = $derived(allUnits.length > visibleCount);
+	const visibleUnits = $derived(
+		hasHiddenMessages ? allUnits.slice(allUnits.length - visibleCount) : allUnits
 	);
 
 	let loadSentinelEl: HTMLDivElement;
@@ -315,7 +412,7 @@
 		// Remember scroll height before loading more so we can maintain position
 		const prevScrollHeight = messagesEl.scrollHeight;
 
-		visibleCount = Math.min(visibleCount + MESSAGES_PER_PAGE, activePath.length);
+		visibleCount = Math.min(visibleCount + MESSAGES_PER_PAGE, allUnits.length);
 
 		// After DOM updates, restore scroll position so the view doesn't jump
 		tick().then(() => {
@@ -591,6 +688,9 @@
 		type?: string;
 		chat_id: string;
 		message_id?: string;
+		parent_id?: string | null;
+		role?: string;
+		meta?: Record<string, any> | null;
 		delta?: string;
 		output?: any;
 		tasks?: ChatTask[];
@@ -678,6 +778,33 @@
 		}
 
 		if (!data.message_id) return;
+
+		// Step-row rotation: the task closed its current step row and opened a
+		// fresh one chained after it. Insert it live so subsequent delta/output
+		// events for the new row are not dropped until the final `done` refetch.
+		if (data.type === 'message_created') {
+			if (!allMessages.some((m) => m.id === data.message_id)) {
+				allMessages = [
+					...allMessages,
+					{
+						id: data.message_id,
+						parent_id: data.parent_id ?? null,
+						role: 'assistant',
+						content: '',
+						model: null,
+						done: false,
+						output: [],
+						usage: null,
+						meta: data.meta ?? null,
+						created_at: Date.now(),
+					}
+				];
+			}
+			currentMessageId = data.message_id;
+			contentVersion++;
+			return;
+		}
+
 		const msg = allMessages.find((m) => m.id === data.message_id);
 		if (!msg) return;
 
@@ -2006,40 +2133,45 @@
 					{#if hasHiddenMessages}
 						<div bind:this={loadSentinelEl} class="h-1 w-full" aria-hidden="true"></div>
 					{/if}
-					{#each visiblePath as { msg, siblingIds, siblingIndex } (msg.id)}
+					{#each visibleUnits as unit (unit.id)}
+						{@const first = unit.rows[0]}
 						<div class="chat-row">
-							{#if msg.role === 'user'}
+							{#if unit.role === 'user'}
 								<UserMessage
-									content={msg.content}
-									meta={msg.meta}
-									createdAt={msg.created_at}
-									compacted={msg.compacted}
-									compactedSummary={msg.chat_summary}
-									{siblingIndex}
-									siblingTotal={siblingIds.length}
-									onnavigate={(dir) => handleNavigate(msg.id, dir)}
-									onedit={(c, submit) => handleEditMessage(msg.id, c, null, submit)}
+									content={first.content}
+									meta={first.meta}
+									createdAt={first.created_at}
+									compacted={first.compacted}
+									compactedSummary={first.chat_summary}
+									siblingIndex={unit.siblingIndex}
+									siblingTotal={unit.siblingIds.length}
+									onnavigate={(dir) => handleNavigate(first.id, dir)}
+									onedit={(c, submit) => handleEditMessage(first.id, c, null, submit)}
 								/>
 							{:else}
+								{@const last = unit.rows[unit.rows.length - 1]}
 								<AssistantMessage
-									content={msg.content}
-									meta={msg.meta}
-									done={msg.done}
-									output={msg.output}
-									compacted={msg.compacted}
-									compactedSummary={msg.chat_summary}
-									usage={msg.usage}
+									content={unit.content}
+									meta={first.meta}
+									done={unit.done}
+									output={unit.output}
+									compacted={unit.compacted}
+									compactedSummary={unit.compactedSummary}
+									compactedRowId={unit.compactedRowId}
+									multiStep={unit.multiStep}
+									editRow={unit.multiStep ? last : null}
+									usage={unit.usage}
 									{chatId}
-									messageId={msg.id}
-									createdAt={msg.created_at}
-									{siblingIndex}
-									siblingTotal={siblingIds.length}
-									speaking={speakingMessageId === msg.id}
-									onnavigate={(dir) => handleNavigate(msg.id, dir)}
-									onfork={sending || streaming ? undefined : () => handleForkChat(msg.id)}
-									onregenerate={() => handleRegenerate(msg.id)}
-									onedit={(c, o, submit) => handleEditMessage(msg.id, c, o, submit)}
-									onspeak={() => speakMessage(msg.id)}
+									messageId={last.id}
+									createdAt={first.created_at}
+									siblingIndex={unit.siblingIndex}
+									siblingTotal={unit.siblingIds.length}
+									speaking={speakingMessageId === last.id}
+									onnavigate={(dir) => handleNavigate(first.id, dir)}
+									onfork={sending || streaming ? undefined : () => handleForkChat(last.id)}
+									onregenerate={() => handleRegenerate(first.id)}
+									onedit={(c, o, submit) => handleEditMessage(last.id, c, o, submit)}
+									onspeak={() => speakMessage(last.id)}
 									onapprove={handleApprove}
 								/>
 							{/if}

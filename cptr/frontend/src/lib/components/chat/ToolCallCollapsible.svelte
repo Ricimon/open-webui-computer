@@ -221,7 +221,7 @@
 						transition-colors duration-100"
 						onclick={(e) => {
 							e.stopPropagation();
-							onapprove(messageId, item.call_id, true);
+							onapprove(item._rowId ?? messageId, item.call_id, true);
 						}}>{$t('chat.allow')}</button
 					>
 					<button
@@ -231,7 +231,7 @@
 						transition-colors duration-100"
 						onclick={(e) => {
 							e.stopPropagation();
-							onapprove(messageId, item.call_id, false);
+							onapprove(item._rowId ?? messageId, item.call_id, false);
 						}}>{$t('chat.deny')}</button
 					>
 				</span>

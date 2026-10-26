@@ -22,6 +22,16 @@
 		output: any[] | null;
 		compacted?: boolean;
 		compactedSummary?: string | null;
+		/**
+		 * For merged multi-step units: the id of the row carrying the effective
+		 * compaction summary. The icon anchors on that row's first display
+		 * segment instead of group 0. Null for single-row messages (legacy path).
+		 */
+		compactedRowId?: string | null;
+		/** True when this unit merges several step rows (disables save-as-copy). */
+		multiStep?: boolean;
+		/** Row that owns the editable content/output of a merged unit. */
+		editRow?: Record<string, any> | null;
 		usage: Record<string, number> | null;
 		chatId: string | null;
 		messageId: string;
@@ -43,6 +53,9 @@
 		output,
 		compacted = false,
 		compactedSummary = null,
+		compactedRowId = null,
+		multiStep = false,
+		editRow = null,
 		usage,
 		chatId,
 		messageId,
@@ -61,6 +74,9 @@
 	let edit = $state(false);
 	let editedContent = $state('');
 	let editedOutput = $state<any[] | null>(null);
+	// Content source of the active edit (final row's own content for merged
+	// units, so saves never write series-wide text onto one step row).
+	let editSrcContent = $state('');
 	let copied = $state(false);
 	let showUsageTooltip = $state(false);
 	let collapsedFiles = $state<Record<string, boolean>>({});
@@ -68,10 +84,15 @@
 
 	async function startEdit() {
 		edit = true;
-		if (output?.length) {
-			editedOutput = JSON.parse(JSON.stringify(output));
+		// A merged step unit edits the final step row's own content/output,
+		// not the whole series (earlier steps are execution trace).
+		const srcOutput = multiStep ? editRow?.output : output;
+		const srcContent = multiStep ? (editRow?.content ?? '') : content;
+		editSrcContent = srcContent;
+		if (srcOutput?.length) {
+			editedOutput = JSON.parse(JSON.stringify(srcOutput));
 		} else {
-			editedContent = content;
+			editedContent = srcContent;
 		}
 		await tick();
 		if (!editedOutput && textareaEl) {
@@ -89,7 +110,7 @@
 
 	function saveEdit() {
 		if (editedOutput) {
-			onedit?.(content, editedOutput, false);
+			onedit?.(editSrcContent, editedOutput, false);
 		} else {
 			onedit?.(editedContent, null, false);
 		}
@@ -99,8 +120,11 @@
 	}
 
 	function saveAsCopy() {
+		// A whole step series is not a single editable unit; only the final row
+		// can be copied.
+		if (multiStep) return;
 		if (editedOutput) {
-			onedit?.(content, editedOutput, true);
+			onedit?.(editSrcContent, editedOutput, true);
 		} else {
 			onedit?.(editedContent, null, true);
 		}
@@ -258,27 +282,32 @@
 		calls: any[]; // function_call items
 		reasoning: any[];
 		outputs: Map<string, any>; // call_id → function_call_output
+		rowIds?: string[]; // merged units: source step rows represented here
 	}
 
 	interface MessageItem {
 		type: 'message_item';
 		item: any;
+		rowIds?: string[];
 	}
 
 	interface ArtifactItem {
 		type: 'artifact_item';
 		item: any;
+		rowIds?: string[];
 	}
 
 	interface ImageItem {
 		type: 'image_item';
 		item: any;
+		rowIds?: string[];
 	}
 
 	interface FileItem {
 		type: 'file_item';
 		item: any;
 		index: number;
+		rowIds?: string[];
 	}
 
 	type DisplayItem = ActivityGroup | MessageItem | ArtifactItem | ImageItem | FileItem;
@@ -341,15 +370,22 @@
 			}
 		}
 
-		const ensureGroup = () => {
+		const rowIdsOf = (item: any): string[] =>
+			typeof item._rowId === 'string' && item._rowId ? [item._rowId] : [];
+
+		const ensureGroup = (item: any) => {
 			if (!currentGroup) {
 				currentGroup = {
 					type: 'activity_group',
 					entries: [],
 					calls: [],
 					reasoning: [],
-					outputs: outputMap
+					outputs: outputMap,
+					rowIds: []
 				};
+			}
+			for (const rid of rowIdsOf(item)) {
+				if (!currentGroup.rowIds!.includes(rid)) currentGroup.rowIds!.push(rid);
 			}
 		};
 
@@ -363,12 +399,12 @@
 		for (const [index, item] of output.entries()) {
 			if (item.type === 'function_call') {
 				if (item.name !== 'ask_user' || item.status !== 'pending') {
-					ensureGroup();
+					ensureGroup(item);
 					currentGroup!.entries.push(item);
 					currentGroup!.calls.push(item);
 				}
 			} else if (item.type === 'reasoning') {
-				ensureGroup();
+				ensureGroup(item);
 				currentGroup!.entries.push(item);
 				currentGroup!.reasoning.push(item);
 			} else if (item.type === 'message') {
@@ -376,19 +412,18 @@
 				// Only visible assistant text should break a consecutive activity run.
 				if (messageItemText(item).trim()) {
 					flushGroup();
-					items.push({ type: 'message_item', item });
+					items.push({ type: 'message_item', item, rowIds: rowIdsOf(item) });
 				}
 			} else if (item.type === 'artifact') {
 				flushGroup();
-				items.push({ type: 'artifact_item', item });
+				items.push({ type: 'artifact_item', item, rowIds: rowIdsOf(item) });
 			} else if (item.type === 'image') {
 				flushGroup();
-				items.push({ type: 'image_item', item });
+				items.push({ type: 'image_item', item, rowIds: rowIdsOf(item) });
 			} else if (item.type === 'file') {
 				flushGroup();
-				items.push({ type: 'file_item', item, index });
+				items.push({ type: 'file_item', item, index, rowIds: rowIdsOf(item) });
 			}
-			// function_call_output items are handled via outputMap, skip standalone render
 		}
 		flushGroup();
 
@@ -405,6 +440,20 @@
 			Boolean(stripStructuredImageMarkdown(messageItemText(first.item)).trim())
 		);
 	});
+
+	// First display segment derived from the compacted step row (merged units
+	// only). Falls back to the unit head when the row contributes no segments.
+	const compactedAnchorIdx = $derived.by((): number => {
+		if (!compacted || !compactedRowId) return -1;
+		const idx = displayItems.findIndex((it: any) => (it.rowIds ?? []).includes(compactedRowId!));
+		return idx >= 0 ? idx : 0;
+	});
+
+	function showCompactedIcon(groupIdx: number): boolean {
+		if (!compacted) return false;
+		if (!compactedRowId) return groupIdx === 0; // legacy single-row path
+		return groupIdx === compactedAnchorIdx;
+	}
 
 	// Clicking a compaction icon opens the in-page summary window (rendered
 	// at the layout level); hover only shows the plain label tooltip.
@@ -454,10 +503,12 @@
 				{/if}
 			</div>
 			<div class="flex justify-between mt-2 text-[0.75rem] font-medium">
-				<button
-					class="px-3 py-1 rounded-lg text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300 transition-colors duration-100"
-					onclick={saveAsCopy}>{$t('chat.saveAs')}</button
-				>
+				{#if !multiStep}
+					<button
+						class="px-3 py-1 rounded-lg text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300 transition-colors duration-100"
+						onclick={saveAsCopy}>{$t('chat.saveAs')}</button
+					>
+				{/if}
 				<div class="flex gap-1.5">
 					<button
 						class="px-3 py-1 rounded-lg text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300 transition-colors duration-100"
@@ -496,7 +547,7 @@
 					{#if displayItem.type === 'message_item'}
 						{@const messageText = stripStructuredImageMarkdown(messageItemText(displayItem.item))}
 						{#if messageText}
-							{#if groupIdx === 0 && compacted}
+							{#if showCompactedIcon(groupIdx)}
 								<button
 									type="button"
 									class="float-left mr-1 mt-1 text-sky-500 dark:text-sky-400 cursor-pointer"
@@ -608,7 +659,7 @@
 								<ReasoningCollapsible
 									{item}
 									fallbackId={`reasoning-${groupIdx}-0`}
-									compacted={groupIdx === 0 && compacted}
+									compacted={showCompactedIcon(groupIdx)}
 									{compactedSummary}
 								/>
 							{:else}
@@ -620,7 +671,7 @@
 									{messageId}
 									{toolLabel}
 									{onapprove}
-									compacted={groupIdx === 0 && compacted}
+									compacted={showCompactedIcon(groupIdx)}
 									{compactedSummary}
 								/>
 							{/if}
@@ -631,7 +682,7 @@
 								reasoning={displayItem.reasoning}
 								outputs={displayItem.outputs}
 								{done}
-								compacted={groupIdx === 0 && compacted}
+								compacted={showCompactedIcon(groupIdx)}
 								{chatId}
 								{messageId}
 								{groupIdx}

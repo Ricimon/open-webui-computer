@@ -286,14 +286,14 @@
 							bg-gray-100 dark:bg-white/8
 							hover:bg-gray-200 dark:hover:bg-white/12
 							transition-colors duration-100"
-							onclick={() => onapprove(messageId, item.call_id, true)}>{$t('chat.allow')}</button
+							onclick={() => onapprove(item._rowId ?? messageId, item.call_id, true)}>{$t('chat.allow')}</button
 						>
 						<button
 							class="text-[0.6875rem] px-2 py-0.5 rounded-md
 							text-gray-400 dark:text-gray-500
 							hover:text-gray-600 dark:hover:text-gray-300
 							transition-colors duration-100"
-							onclick={() => onapprove(messageId, item.call_id, false)}>{$t('chat.deny')}</button
+							onclick={() => onapprove(item._rowId ?? messageId, item.call_id, false)}>{$t('chat.deny')}</button
 						>
 					</span>
 				</div>

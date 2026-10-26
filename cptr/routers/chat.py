@@ -328,6 +328,19 @@ async def get_models(request: Request):
     return {"models": models, "default": default_model}
 
 
+def _assistant_row_is_step_follow(message) -> bool:
+    """True for assistant rows that are non-root steps of a step series.
+
+    Step rows carry meta.task_root pointing at the first row of their series;
+    such rows count toward tokens and tool usage but not message counts (the
+    series is counted once, at its root). Legacy rows have no task_root and
+    count as-is.
+    """
+    meta = message.meta if isinstance(message.meta, dict) else {}
+    root = meta.get("task_root")
+    return isinstance(root, str) and bool(root) and root != message.id
+
+
 @router.get("/usage")
 async def get_usage(request: Request, days: int | None = Query(None, ge=7, le=732)):
     """Aggregate personal chat usage for the settings Usage tab."""
@@ -414,12 +427,16 @@ async def get_usage(request: Request, days: int | None = Query(None, ge=7, le=73
             continue
 
         day = day_date.isoformat()
-        day_stats[day]["messages"] += 1
+        is_step_follow = message.role == "assistant" and _assistant_row_is_step_follow(message)
+        if not is_step_follow:
+            # A step series counts as one assistant message (its root row);
+            # non-root step rows are the same visible turn, not new messages.
+            day_stats[day]["messages"] += 1
         chat_ids_by_day[day].add(message.chat_id)
 
         if message.role == "user":
             user_messages += 1
-        elif message.role == "assistant":
+        elif message.role == "assistant" and not is_step_follow:
             assistant_messages += 1
 
         model_id = message.model or None
@@ -427,9 +444,12 @@ async def get_usage(request: Request, days: int | None = Query(None, ge=7, le=73
             day_stats[day]["tokens"] += tokens
 
         if message.role == "assistant" and model_id:
-            day_models = day_stats[day]["models"]
-            day_models[model_id] = day_models.get(model_id, 0) + 1
-            model_stats[model_id]["messages"] += 1
+            # Tokens are real per-generation API usage, so every step row's
+            # usage counts; only the message count collapses to the root.
+            if not is_step_follow:
+                day_models = day_stats[day]["models"]
+                day_models[model_id] = day_models.get(model_id, 0) + 1
+                model_stats[model_id]["messages"] += 1
             model_stats[model_id]["total_tokens"] += tokens
 
         for value in (message.output, message.meta):

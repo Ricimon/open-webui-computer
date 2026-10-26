@@ -1352,20 +1352,44 @@ def _append_prompt_suffix(messages: list[dict], suffix: str) -> None:
         return
 
 
+def _row_task_root(message: dict) -> str | None:
+    """meta.task_root of a message row, if it belongs to a step series."""
+    meta = message.get("meta")
+    if isinstance(meta, dict):
+        root = meta.get("task_root")
+        if isinstance(root, str) and root:
+            return root
+    return None
+
+
 def _find_safe_split(messages: list[dict], target_keep: int) -> int:
     """Find a safe split index that doesn't break tool call pairs.
 
     Returns the index where keep_zone starts. Ensures:
     - Never splits between an assistant tool_call and its tool result
     - keep_zone doesn't start with a tool result message
+    - keep_zone doesn't start mid-series (step rows of one assistant task are
+      merged into one visible message; the boundary must fall before the
+      series, not inside it)
     - At least 2 messages are kept
     """
     n = len(messages)
     split = min(max(2, n - target_keep), max(0, n - 2))
 
-    # Don't start keep_zone with a tool result; keep its assistant call too.
-    while split > 0 and messages[split].get("role") == "tool":
-        split -= 1
+    while split > 0:
+        message = messages[split]
+        # Don't start keep_zone with a tool result; keep its assistant call too.
+        if message.get("role") == "tool":
+            split -= 1
+            continue
+        # Don't start keep_zone on a mid-series step row: jump back to the
+        # first row of that series and re-validate from there.
+        root = _row_task_root(message)
+        if root and any(_row_task_root(m) == root for m in messages[:split]):
+            while split > 0 and _row_task_root(messages[split - 1]) == root:
+                split -= 1
+            continue
+        break
 
     return split
 
@@ -1510,7 +1534,7 @@ async def run_chat_task(
             title = chat_obj.title if chat_obj else "Chat"
         except Exception:
             title = "Chat"
-        preview = content[:300] if content else ""
+        preview = series_text[:300] if series_text else ""
         ws_name = workspace.rstrip("/").rsplit("/", 1)[-1] if workspace else ""
         try:
             await clear_active_tasks(chat_id, user_id, message_id)
@@ -1530,13 +1554,27 @@ async def run_chat_task(
 
     # Load existing state so continuations don't overwrite previous output
     msg = await ChatMessage.get_by_id(message_id)
+    row_meta: dict = dict(msg.meta or {}) if msg else {}
+    # A resumed row may be a mid-series step; the series root is whatever its
+    # meta.task_root says (fallback to itself for fresh/legacy rows).
+    _meta_root = row_meta.get("task_root")
+    series_root_id = _meta_root if isinstance(_meta_root, str) and _meta_root else message_id
     summary_message_id = message_id
     if msg and msg.parent_id:
-        parent_msg = await ChatMessage.get_by_id(msg.parent_id)
-        if parent_msg and parent_msg.role == "user":
-            summary_message_id = parent_msg.id
+        # Walk up past sibling step rows (their parent is the previous step,
+        # not a prompt) so the anchor lands on the user prompt row.
+        anchor = await ChatMessage.get_by_id(msg.parent_id)
+        while anchor and anchor.role == "assistant" and (anchor.meta or {}).get("task_root"):
+            anchor = await ChatMessage.get_by_id(anchor.parent_id) if anchor.parent_id else None
+        if anchor and anchor.role == "user":
+            summary_message_id = anchor.id
     content = (msg.content or "") if msg else ""
+    series_text = content  # Whole-series text; per-row `content` resets at rotation
+    _meta_step = row_meta.get("step")
+    step_index = _meta_step if isinstance(_meta_step, int) and _meta_step >= 1 else 1
     output_items: list[dict] = list(msg.output or []) if msg else []
+    step_usage: dict | None = None  # usage of the generation closing into the current row
+    series_row_ids: list[str] = [message_id]  # Every row id this task owns (for cleanup)
     text_buffer = ""  # Accumulates text between tool calls
     task_completed_success = False
     review_messages: list[dict] = []
@@ -1604,6 +1642,66 @@ async def run_chat_task(
         log("[task %s] db save (%s) result: updated=%s", message_id[:8], save_reason, saved)
         return saved
 
+    async def _rotate_step() -> None:
+        """Close the current step row and open a fresh one for the next generation.
+
+        A step row holds exactly one LLM generation: its reasoning, visible
+        text, tool-call batch, and that batch's results. The new row chains
+        after the closed one via parent_id so compaction can anchor mid-series
+        and the UI can merge the whole series into one visible message.
+        ``message_id`` advances to the new row; registry aliases are kept for
+        the old id so in-flight cancels targeting it still work.
+        """
+        nonlocal message_id, content, text_buffer, output_items, step_index, step_usage, row_meta
+
+        _flush_text()
+        for item in output_items:
+            if item.get("type") == "reasoning" and item.get("status") == "in_progress":
+                item["status"] = "completed"
+
+        close_kwargs: dict = {"content": content, "output": list(output_items), "done": True}
+        if step_usage:
+            close_kwargs["usage"] = step_usage
+        await ChatMessage.update(message_id, **close_kwargs)
+
+        closed_row_id = message_id
+        step_index += 1
+        row_meta = {"task_root": series_root_id, "step": step_index}
+        new_row = await ChatMessage.create(
+            chat_id=chat_id,
+            role="assistant",
+            content="",
+            parent_id=closed_row_id,
+            model=model if isinstance(model, str) and model else None,
+            done=False,
+            meta=row_meta,
+            created_at=now_ms(),
+        )
+
+        task_ref = _tasks.get(closed_row_id)
+        if task_ref is not None:
+            _tasks[new_row.id] = task_ref  # alias: cancels may target the closed row
+        _task_chat[new_row.id] = chat_id
+        series_row_ids.append(new_row.id)
+        await Chat.update_current_message(chat_id, new_row.id, now_ms())
+
+        message_id = new_row.id
+        content = ""
+        text_buffer = ""
+        output_items = []
+        step_usage = None
+        tool_ctx["message_id"] = message_id  # tools parent sub-rows off the current step
+        _task_state.pop(closed_row_id, None)
+        _sync_state()
+        logger.info(
+            "[task %s] rotated: closed=%s opened=%s step=%d",
+            series_root_id[:8],
+            closed_row_id[:8],
+            new_row.id[:8],
+            step_index,
+        )
+        await emit(type="message_created", role="assistant", parent_id=closed_row_id, meta=dict(row_meta))
+
     async def save_session(agent_target: AgentModelTarget, resume_state: dict | None):
         if not resume_state:
             return
@@ -1624,8 +1722,8 @@ async def run_chat_task(
         await Chat.update_meta(chat_id, meta, now_ms())
 
     async def _run_agent_target(agent_target: AgentModelTarget):
-        nonlocal content, text_buffer, task_completed_success, skill_authoring_allowed
-        nonlocal skill_create_requested
+        nonlocal content, series_text, text_buffer, task_completed_success
+        nonlocal skill_authoring_allowed, skill_create_requested
         from cptr.utils.agents.claude_code import run_claude_code_agent
         from cptr.utils.agents.cline import run_cline_agent
         from cptr.utils.agents.codex import run_codex_agent
@@ -1737,6 +1835,7 @@ async def run_chat_task(
             if isinstance(event, AgentTextDelta):
                 await _finish_reasoning_item()
                 content += event.text
+                series_text += event.text
                 text_buffer += event.text
                 await emit(delta=event.text)
                 _sync_state()
@@ -1900,7 +1999,7 @@ async def run_chat_task(
                 )
                 _task_state.pop(message_id, None)
                 await _emit_done()
-                preview = content[:300] if content else ""
+                preview = series_text[:300] if series_text else ""
                 await publish_event(
                     EVENTS.CHAT_FINISHED,
                     actor={"id": user_id},
@@ -1920,7 +2019,7 @@ async def run_chat_task(
         await _save_message("agent stream ended", content=content, output=output_items, done=True)
         _task_state.pop(message_id, None)
         await _emit_done()
-        preview = content[:300] if content else ""
+        preview = series_text[:300] if series_text else ""
         await publish_event(
             EVENTS.CHAT_FINISHED,
             actor={"id": user_id},
@@ -2108,7 +2207,7 @@ async def run_chat_task(
                     and tool
                     and await review_tool_approval(
                         messages=messages,
-                        assistant_text=content,
+                        assistant_text=series_text,
                         connection=connection,
                         model=model,
                         tool_name=name,
@@ -2207,6 +2306,7 @@ async def run_chat_task(
         if resumed_calls == "approval_required":
             return
         if resumed_calls == "completed":
+            await _rotate_step()
             pre_reload = messages
             messages, loaded_summary = await _load_message_history(chat_id, message_id)
             if not regeneration_prompt:
@@ -2217,6 +2317,12 @@ async def run_chat_task(
                     message_id,
                     source=pre_reload,
                 )
+        elif resumed_calls == "idle" and any(
+            item.get("type") == "function_call" for item in output_items
+        ):
+            # A resumed row may already hold a completed generation (e.g., a
+            # double resume); the next generation starts in a fresh step row.
+            await _rotate_step()
 
         last_usage: dict | None = None  # real usage from last API call
         new_messages_since: int = 0  # messages appended since last API call
@@ -2263,6 +2369,12 @@ async def run_chat_task(
                 {**existing, **reasoning_kwargs} if isinstance(existing, dict) else reasoning_kwargs
             )
             request_params = rp
+
+        # Tag the series root so every step row (including this first one)
+        # carries meta.task_root; resume rows keep their existing meta/step.
+        if "task_root" not in row_meta:
+            row_meta = {**row_meta, "task_root": series_root_id}
+            await ChatMessage.update(message_id, meta=row_meta)
 
         for _iteration in range(CHAT_MAX_ITERATIONS):
             # ── Context compaction: summarize older messages if too large ──
@@ -2419,6 +2531,7 @@ async def run_chat_task(
             async for event in stream:
                 if event["type"] == "text_delta":
                     content += event["content"]
+                    series_text += event["content"]
                     text_buffer += event["content"]
                     await emit(delta=event["content"])
                     if provider_type == "llama.cpp" and usage_context_tokens(last_usage) <= 0:
@@ -2477,6 +2590,7 @@ async def run_chat_task(
                 elif event["type"] == "usage":
                     usage = normalize_usage({k: v for k, v in event.items() if k != "type"})
                     last_usage = usage
+                    step_usage = usage
                     new_messages_since = 0
                     tokens = usage_context_tokens(usage)
                     if tokens > 0:
@@ -2515,7 +2629,7 @@ async def run_chat_task(
                         )
                         _task_state.pop(message_id, None)
                         await _emit_done()
-                        preview = content[:300] if content else ""
+                        preview = series_text[:300] if series_text else ""
                         await publish_event(
                             EVENTS.CHAT_FINISHED,
                             actor={"id": user_id},
@@ -2586,6 +2700,7 @@ async def run_chat_task(
                         await _save_message(
                             "invalid ask_user", content=content, output=output_items
                         )
+                        await _rotate_step()
                         continue
 
                     expires_at = now_ms() + arguments["autoResolutionMs"]
@@ -2702,6 +2817,7 @@ async def run_chat_task(
                     if queue_result == "approval_required":
                         return
                     if queue_result == "completed":
+                        await _rotate_step()
                         pre_reload = messages
                         messages, loaded_summary = await _load_message_history(chat_id, message_id)
                         if not regeneration_prompt:
@@ -2849,6 +2965,7 @@ async def run_chat_task(
 
                 # Persist after all tool calls
                 await _save_message("tool calls complete", content=content, output=output_items)
+                await _rotate_step()
                 restart = True
 
             if not restart:
@@ -2864,7 +2981,7 @@ async def run_chat_task(
                 )
                 _task_state.pop(message_id, None)
                 await _emit_done()
-                preview = content[:300] if content else ""
+                preview = series_text[:300] if series_text else ""
                 await publish_event(
                     EVENTS.CHAT_FINISHED,
                     actor={"id": user_id},
@@ -2923,6 +3040,7 @@ async def run_chat_task(
         # Append error to content so it's visible in the chat
         error_block = f"\n\n> **Error:** {error_msg}"
         content += error_block
+        series_text += error_block
         text_buffer += error_block
         flushed_item = _flush_text()
         if flushed_item:
@@ -2957,9 +3075,10 @@ async def run_chat_task(
                 await output_queue.put(None)
             except Exception:
                 pass
-        _tasks.pop(message_id, None)
-        _task_state.pop(message_id, None)
-        _task_chat.pop(message_id, None)
+        for rid in series_row_ids:
+            _tasks.pop(rid, None)
+            _task_state.pop(rid, None)
+            _task_chat.pop(rid, None)
         if chat_id not in get_active_chat_ids():
             try:
                 await Chat.touch(chat_id, now_ms())
