@@ -719,6 +719,8 @@
 	"plusMenu.reasoningXHigh": "XHigh",
 	"plusMenu.compaction": "Compactación",
 	"plusMenu.compactKeep": "Mantener",
+	"plusMenu.compactThreshold": "Umbral",
+	"plusMenu.compactTokens": "tokens",
 	"plusMenu.noParams": "No hay parámetros configurados",
 	"plusMenu.paramKey": "clave",
 	"plusMenu.paramValue": "valor",

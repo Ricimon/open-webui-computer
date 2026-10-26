@@ -818,6 +818,8 @@
 	"plusMenu.reasoningXHigh": "XHigh",
 	"plusMenu.compaction": "Compaction",
 	"plusMenu.compactKeep": "Keep",
+	"plusMenu.compactThreshold": "Threshold",
+	"plusMenu.compactTokens": "tokens",
 	"plusMenu.noParams": "No parameters configured",
 	"plusMenu.paramKey": "key",
 	"plusMenu.paramValue": "value",

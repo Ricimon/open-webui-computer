@@ -719,6 +719,8 @@
 	"plusMenu.reasoningXHigh": "XHigh",
 	"plusMenu.compaction": "압축",
 	"plusMenu.compactKeep": "유지",
+	"plusMenu.compactThreshold": "임계값",
+	"plusMenu.compactTokens": "토큰",
 	"plusMenu.noParams": "설정된 매개변수 없음",
 	"plusMenu.paramKey": "키",
 	"plusMenu.paramValue": "값",

@@ -719,6 +719,8 @@
 	"plusMenu.reasoningXHigh": "XHigh",
 	"plusMenu.compaction": "Compaction",
 	"plusMenu.compactKeep": "Conserver",
+	"plusMenu.compactThreshold": "Seuil",
+	"plusMenu.compactTokens": "jetons",
 	"plusMenu.noParams": "Aucun paramètre configuré",
 	"plusMenu.paramKey": "clé",
 	"plusMenu.paramValue": "valeur",

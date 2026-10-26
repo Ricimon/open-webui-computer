@@ -72,6 +72,7 @@
 		reasoningLevel?: ReasoningLevel;
 		voiceModeEnabled?: boolean;
 		compactKeepPercent?: number | null;
+		compactTokenThreshold?: number | null;
 		sending: boolean;
 		streaming?: boolean;
 		workspace?: string;
@@ -109,6 +110,7 @@
 		reasoningLevel = $bindable('default'),
 		voiceModeEnabled = $bindable(false),
 		compactKeepPercent = $bindable<number | null>(null),
+		compactTokenThreshold = $bindable<number | null>(null),
 		sending,
 		streaming = false,
 		workspace = '',
@@ -1645,6 +1647,8 @@
 					bind:requestParams
 					bind:reasoningLevel
 					bind:compactKeepPercent
+					bind:compactTokenThreshold
+					compactTokenThresholdConfig={contextUsage?.threshold ?? null}
 					onchange={onsettingschange}
 					{ontoolapprovalchange}
 					onfiles={(files) => {

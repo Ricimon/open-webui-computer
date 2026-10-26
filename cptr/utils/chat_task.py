@@ -16,6 +16,7 @@ from typing import Any
 from cptr.events import EVENTS, publish_event
 from cptr.env import CHAT_MAX_ITERATIONS, CHAT_TOOL_COMMAND_MAX_CHARS, CHAT_TOOL_MAX_CHARS
 from cptr.utils.context import (
+    apply_chat_compact_token_threshold,
     build_context_usage,
     estimate_messages_tokens,
     estimate_tokens,
@@ -2238,6 +2239,10 @@ async def run_chat_task(
             configured_model, chat_models_config=chat_models_config
         )
         compact_token_threshold = compact_token_threshold or resolve_compact_token_threshold()
+        # Per-chat threshold override (plus-menu compaction setting).
+        compact_token_threshold = apply_chat_compact_token_threshold(
+            chat_params, compact_token_threshold
+        )
         request_params = {**global_rp, **model_rp, **chat_request_params} or None
 
         # Per-chat "keep last N%" (plus-menu compaction setting): the keep zone

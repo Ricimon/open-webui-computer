@@ -72,6 +72,7 @@ export interface ChatSendParams {
 	reasoning_level?: ReasoningLevel;
 	voice_mode?: boolean;
 	compact_keep_percent?: number | null;
+	compact_token_threshold?: number | null;
 }
 
 export interface CompactChatResult {

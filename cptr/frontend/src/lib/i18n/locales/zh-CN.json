@@ -719,6 +719,8 @@
 	"plusMenu.reasoningXHigh": "XHigh",
 	"plusMenu.compaction": "压缩",
 	"plusMenu.compactKeep": "保留",
+	"plusMenu.compactThreshold": "阈值",
+	"plusMenu.compactTokens": "token",
 	"plusMenu.noParams": "未配置参数",
 	"plusMenu.paramKey": "键",
 	"plusMenu.paramValue": "值",

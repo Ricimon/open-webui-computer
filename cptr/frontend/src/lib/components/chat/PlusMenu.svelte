@@ -14,6 +14,8 @@
 		requestParams?: Record<string, unknown>;
 		reasoningLevel?: ReasoningLevel;
 		compactKeepPercent?: number | null;
+		compactTokenThreshold?: number | null;
+		compactTokenThresholdConfig?: number | null;
 		onchange?: () => void;
 		ontoolapprovalchange?: (mode: ToolApprovalMode) => void;
 	}
@@ -25,6 +27,8 @@
 		requestParams = $bindable({}),
 		reasoningLevel = $bindable('default'),
 		compactKeepPercent = $bindable<number | null>(null),
+		compactTokenThreshold = $bindable<number | null>(null),
+		compactTokenThresholdConfig = null,
 		onchange,
 		ontoolapprovalchange
 	}: Props = $props();
@@ -106,6 +110,41 @@
 		if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
 			e.preventDefault();
 			stepCompactKeep(e.key === 'ArrowUp' ? 1 : -1);
+		}
+	}
+
+	// ── Compaction token threshold (per chat) ─────────────────────
+	// Bound to the chat's saved compaction threshold override. null (empty)
+	// means "use the configured threshold" — the effective value from model /
+	// global config, passed in as compactTokenThresholdConfig and shown as the
+	// placeholder. The default below mirrors CHAT_COMPACT_TOKEN_THRESHOLD in
+	// cptr/env.py, used only when no context usage has been computed yet.
+	const COMPACT_TOKEN_THRESHOLD_DEFAULT = 80000;
+	const COMPACT_TOKEN_THRESHOLD_MIN = 0;
+	const COMPACT_TOKEN_THRESHOLD_STEP = 10000;
+
+	function clampCompactTokenThreshold() {
+		if (compactTokenThreshold === null) return;
+		const before = compactTokenThreshold;
+		compactTokenThreshold = Math.max(COMPACT_TOKEN_THRESHOLD_MIN, compactTokenThreshold);
+		if (compactTokenThreshold !== before) onchange?.();
+	}
+
+	function stepCompactTokenThreshold(dir: 1 | -1) {
+		const base =
+			compactTokenThreshold ??
+			compactTokenThresholdConfig ??
+			COMPACT_TOKEN_THRESHOLD_DEFAULT;
+		const next = Math.max(COMPACT_TOKEN_THRESHOLD_MIN, base + dir * COMPACT_TOKEN_THRESHOLD_STEP);
+		if (next === compactTokenThreshold) return;
+		compactTokenThreshold = next;
+		onchange?.();
+	}
+
+	function handleCompactTokenThresholdKeydown(e: KeyboardEvent) {
+		if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+			e.preventDefault();
+			stepCompactTokenThreshold(e.key === 'ArrowUp' ? 1 : -1);
 		}
 	}
 
@@ -620,13 +659,54 @@
 
 				<div class="flex items-center gap-2 w-full h-7 px-2">
 					<span class="flex-1 text-left text-xs text-gray-500 dark:text-gray-400"
+						>{$t('plusMenu.compactThreshold')}</span
+					>
+					<input
+						type="number"
+						min={COMPACT_TOKEN_THRESHOLD_MIN}
+						step={COMPACT_TOKEN_THRESHOLD_STEP}
+						inputmode="numeric"
+						placeholder={String(
+							compactTokenThresholdConfig ?? COMPACT_TOKEN_THRESHOLD_DEFAULT
+						)}
+						autocomplete="off"
+						bind:value={compactTokenThreshold}
+						onblur={clampCompactTokenThreshold}
+						onkeydown={handleCompactTokenThresholdKeydown}
+						class="compact-keep w-16 shrink-0 rounded bg-gray-50 dark:bg-white/5 px-1 py-0.5 text-center text-xs font-mono text-gray-700 dark:text-gray-300 placeholder:text-gray-300 dark:placeholder:text-gray-600 outline-none"
+					/>
+					<span class="flex flex-col shrink-0">
+						<button
+							type="button"
+							aria-label="Increase compaction threshold"
+							onclick={() => stepCompactTokenThreshold(1)}
+							class="flex items-center justify-center w-[18px] h-[13px] rounded text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300 hover:bg-gray-100 dark:hover:bg-white/10 transition-colors duration-100 cursor-pointer"
+						>
+							<Icon name="chevron-up" size={10} />
+						</button>
+						<button
+							type="button"
+							aria-label="Decrease compaction threshold"
+							onclick={() => stepCompactTokenThreshold(-1)}
+							class="flex items-center justify-center w-[18px] h-[13px] rounded text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300 hover:bg-gray-100 dark:hover:bg-white/10 transition-colors duration-100 cursor-pointer"
+						>
+							<Icon name="chevron-down" size={10} />
+						</button>
+					</span>
+					<span class="w-10 text-left text-xs text-gray-400 dark:text-gray-500">
+						{$t('plusMenu.compactTokens')}
+					</span>
+				</div>
+
+				<div class="flex items-center gap-2 w-full h-7 px-2">
+					<span class="flex-1 text-left text-xs text-gray-500 dark:text-gray-400"
 						>{$t('plusMenu.compactKeep')}</span
 					>
 					<input
 						type="number"
-						min={0}
-						max={100}
-						step="10"
+						min={COMPACT_KEEP_MIN}
+						max={COMPACT_KEEP_MAX}
+						step={COMPACT_KEEP_STEP}
 						inputmode="numeric"
 						placeholder="40"
 						autocomplete="off"
@@ -653,7 +733,7 @@
 							<Icon name="chevron-down" size={10} />
 						</button>
 					</span>
-					<span class="text-xs text-gray-400 dark:text-gray-500">%</span>
+					<span class="w-10 text-left text-xs text-gray-400 dark:text-gray-500">%</span>
 				</div>
 			</div>
 		{/if}

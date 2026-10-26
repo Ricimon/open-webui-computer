@@ -719,6 +719,8 @@
 	"plusMenu.reasoningXHigh": "XHigh",
 	"plusMenu.compaction": "コンパクション",
 	"plusMenu.compactKeep": "保持",
+	"plusMenu.compactThreshold": "閾値",
+	"plusMenu.compactTokens": "トークン",
 	"plusMenu.noParams": "パラメータは設定されていません",
 	"plusMenu.paramKey": "キー",
 	"plusMenu.paramValue": "値",

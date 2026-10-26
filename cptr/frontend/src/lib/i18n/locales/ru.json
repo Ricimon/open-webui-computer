@@ -719,6 +719,8 @@
 	"plusMenu.reasoningXHigh": "XHigh",
 	"plusMenu.compaction": "Компакция",
 	"plusMenu.compactKeep": "Сохранять",
+	"plusMenu.compactThreshold": "Порог",
+	"plusMenu.compactTokens": "токенов",
 	"plusMenu.noParams": "Параметры не настроены",
 	"plusMenu.paramKey": "ключ",
 	"plusMenu.paramValue": "значение",

@@ -207,6 +207,17 @@ def resolve_compact_token_threshold(
     return model_threshold or default_threshold
 
 
+def apply_chat_compact_token_threshold(chat_params: dict | None, threshold: int) -> int:
+    """Return the per-chat threshold override from chat params, if any.
+
+    The plus-menu "Threshold" field stores an optional per-chat override in
+    the chat's saved params (``compact_token_threshold``). Unset or invalid
+    values fall back to the given config-resolved threshold.
+    """
+    override = _parse_positive_int((chat_params or {}).get("compact_token_threshold"))
+    return override or threshold
+
+
 async def load_compact_token_threshold(model: str | None = None) -> int:
     """Load the effective compaction threshold from persisted model config."""
     try:

@@ -727,6 +727,7 @@ async def _get_chat_context_usage(
 
     from cptr.utils.chat_task import _load_message_history, _load_system_prompt
     from cptr.utils.context import (
+        apply_chat_compact_token_threshold,
         build_context_usage,
         estimate_context_usage,
         estimate_messages_tokens,
@@ -738,6 +739,9 @@ async def _get_chat_context_usage(
     workspace = (chat.meta or {}).get("workspace", "")
     model = model_id or await _infer_chat_model(chat.id)
     compact_token_threshold = await load_compact_token_threshold(model)
+    compact_token_threshold = apply_chat_compact_token_threshold(
+        (chat.meta or {}).get("params"), compact_token_threshold
+    )
     system = await _load_system_prompt(request, workspace, model or "", user_id=chat.user_id)
     if existing_summary:
         system += f"\n\n[CONVERSATION SUMMARY]\n{existing_summary}"

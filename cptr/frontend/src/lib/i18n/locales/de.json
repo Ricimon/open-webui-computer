@@ -719,6 +719,8 @@
 	"plusMenu.reasoningXHigh": "XHigh",
 	"plusMenu.compaction": "Kompaktierung",
 	"plusMenu.compactKeep": "Behalten",
+	"plusMenu.compactThreshold": "Schwellenwert",
+	"plusMenu.compactTokens": "Token",
 	"plusMenu.noParams": "Keine Parameter konfiguriert",
 	"plusMenu.paramKey": "Schlüssel",
 	"plusMenu.paramValue": "Wert",
