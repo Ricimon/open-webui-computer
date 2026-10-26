@@ -8,6 +8,9 @@ Changes compared to upstream:
 - Compaction token estimate now accounts for reasoning content.
 - Loading a conversation properly sets the last summary checkpoint to the latest one, instead of the earliest one.
 - Compaction summary generation sets `enable_thinking` to false, and uses the prompt stream timeout rather than a fixed 15-20s timeout.
+- Compaction summary results are now validated and retried if it failed to follow the summary prompt.
+- Compaction summary max tokens increased from 1000 to 2000.
+- Messages with a compacted summary on them will now show an icon that when clicked, displays the summary contents.
 - GitBar information loading is taken off the main thread so that it doesn't block main chat UI loading.
 - Add reasoning level configuration to the chat Plus menu.
 - Add compaction keep-percent to the chat Plus menu, customizes what percentage of past messages are compacted.
@@ -19,6 +22,7 @@ Changes compared to upstream:
 - The default path when adding a new workspace is now `/workspace` rather than `/home/cptr`.
 - Reduced first-time workspace load latency by lazily subscribing directory watchers rather than subscribing all watchers recursively.
 - Well-known instruction files (`AGENTS.md`, `AGENT.md`, `MEMORY.md`, `CLAUDE.md`) are searched for recursively upwards in a workspace.
+- Improved browser performance for long-running conversations.
 - `curl` is added as an apt-installed command to the `Dockerfile`.
 
 This fork has an accompanying article describing how it interfaces with a local AI setup. Read it here:  
