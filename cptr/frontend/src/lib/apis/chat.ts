@@ -14,6 +14,7 @@ export interface ChatMessageRow {
 	usage: Record<string, number> | null;
 	meta: Record<string, any> | null;
 	compacted?: boolean;
+	chat_summary?: string | null;
 	created_at: number;
 }
 
