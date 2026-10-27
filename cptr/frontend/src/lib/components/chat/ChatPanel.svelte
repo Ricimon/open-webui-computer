@@ -348,22 +348,6 @@
 		return Object.keys(acc).length ? acc : null;
 	}
 
-	// Per-row memoization of the tagged output used to merge multi-step
-	// series. Rows are immutable once done, so only the streaming row
-	// recomputes per token; without this every token shallow-copies every
-	// item in the whole series. Cleared in loadChat (fresh rows from the API
-	// and possible id reuse across chats).
-	const rowMergeCache = new Map<string, { output: any[] | null; tagged: any[] }>();
-
-	function taggedRowOutput(r: ChatMessageRow): any[] {
-		const out = r.output ?? null;
-		const cached = rowMergeCache.get(r.id);
-		if (cached && cached.output === out) return cached.tagged;
-		const tagged = out ? out.map((item: any) => ({ ...item, _rowId: r.id })) : [];
-		rowMergeCache.set(r.id, { output: out, tagged });
-		return tagged;
-	}
-
 	function buildDisplayUnits(entries: PathEntry[]): DisplayUnit[] {
 		const units: DisplayUnit[] = [];
 		for (const entry of entries) {
@@ -397,7 +381,7 @@
 			unit.content = unit.rows.map((r) => r.content ?? '').join('');
 			// Tag each item with its source row so the compaction icon can
 			// anchor mid-series and tool approval routes to the owning row.
-			unit.output = unit.rows.flatMap((r) => taggedRowOutput(r));
+			unit.output = unit.rows.flatMap((r) => (r.output ?? []).map((item: any) => ({ ...item, _rowId: r.id })));
 			unit.done = unit.rows[unit.rows.length - 1].done;
 			unit.usage = mergeUnitUsage(unit.rows);
 			const summaryRows = unit.rows.filter((r) => r.chat_summary);
@@ -434,7 +418,6 @@
 		tick().then(() => {
 			if (messagesEl) {
 				const newScrollHeight = messagesEl.scrollHeight;
-				programmaticScroll = true;
 				messagesEl.scrollTop += newScrollHeight - prevScrollHeight;
 			}
 			loadingMore = false;
@@ -544,7 +527,6 @@
 			// Discard stale response if a newer loadChat was called while we waited
 			if (gen !== loadGeneration) return;
 			allMessages = data.messages;
-			rowMergeCache.clear();
 			loadChatSettings(data.chat.meta);
 			currentMessageId = data.chat.current_message_id;
 			contextUsage = data.context_usage ?? null;
@@ -571,14 +553,10 @@
 		if (savedScroll >= 0 && !autoScroll) {
 			await tick();
 			if (messagesEl) {
-				programmaticScroll = true;
 				messagesEl.scrollTop = savedScroll;
 				// Also restore after rAF to beat any competing scroll operations
 				requestAnimationFrame(() => {
-					if (messagesEl) {
-						programmaticScroll = true;
-						messagesEl.scrollTop = savedScroll;
-					}
+					if (messagesEl) messagesEl.scrollTop = savedScroll;
 				});
 			}
 		}
@@ -820,14 +798,13 @@
 				];
 			}
 			currentMessageId = data.message_id;
-			bumpContent();
 			return;
 		}
 
 		// Auto-compaction committed mid-task: mark the checkpoint row so the
 		// compaction indicator appears without waiting for a reload.
 		if (data.type === 'message_compacted' && data.row_id) {
-			const compactedRow = allMessages.find((m) => m.id === data.row_id);
+			const compactedRow = allMessages.findLast((m) => m.id === data.row_id);
 			if (compactedRow) {
 				compactedRow.compacted = true;
 				compactedRow.chat_summary = data.chat_summary ?? null;
@@ -835,15 +812,15 @@
 			return;
 		}
 
-		const msg = allMessages.find((m) => m.id === data.message_id);
+		// const msgIndex = allMessages.findLastIndex((m) => m.id === data.message_id);
+		// if (msgIndex === -1) return;
+		// const msg = allMessages[msgIndex];
+		const msg = allMessages.findLast((m) => m.id === data.message_id);
 		if (!msg) return;
 
 		if (data.delta) {
-			// In-place mutation: the $state proxy already tracks it, so no
-			// array reassignment is needed. Bump content (coalesced per frame)
-			// to drive the auto-scroll pin.
 			msg.content += data.delta;
-			bumpContent();
+			// allMessages = [...allMessages];
 			handleTtsDelta(data.message_id, data.delta);
 		}
 		if (data.output) {
@@ -860,8 +837,8 @@
 				// Responses-style reasoning items stream as output item updates.
 				const itemId = data.output.id;
 				const existingIdx = itemId
-					? existing.findIndex((o: any) => o.type === 'reasoning' && o.id === itemId)
-					: existing.findIndex((o: any) => o.type === 'reasoning');
+					? existing.findLastIndex((o: any) => o.type === 'reasoning' && o.id === itemId)
+					: existing.findLastIndex((o: any) => o.type === 'reasoning');
 				if (existingIdx >= 0) {
 					existing[existingIdx] = data.output;
 					msg.output = [...existing];
@@ -869,7 +846,7 @@
 					msg.output = [...existing, data.output];
 				}
 			} else if (callId && itemType) {
-				const existingIdx = existing.findIndex(
+				const existingIdx = existing.findLastIndex(
 					(o: any) => o.type === itemType && o.call_id === callId
 				);
 				if (existingIdx >= 0) {
@@ -882,7 +859,7 @@
 			} else {
 				msg.output = [...existing, data.output];
 			}
-			bumpContent();
+			// allMessages = [...allMessages];
 		}
 		if (data.error) {
 			toast.error(data.error, { duration: 8000 });
@@ -908,10 +885,10 @@
 			// the DB reload returns. This avoids a transient blank message if the
 			// final `done` socket event beats the commit/read path.
 			msg.done = true;
-			bumpContent();
 			if (chatTasks.some((task) => task.status === 'pending' || task.status === 'in_progress')) {
 				setChatTasks([]);
 			}
+			// allMessages = [...allMessages];
 			loadChat(data.chat_id);
 		}
 	}
@@ -1096,35 +1073,12 @@
 
 	// ── Auto-scroll ─────────────────────────────────────────────
 
-	// Content-growth signal for the bottom-pin, coalesced per animation
-	// frame: N socket events within one frame produce a single pin attempt
-	// (and a single forced layout), not one per event. In-place $state
-	// mutations are already reactive for rendering; only the scroll pin
-	// needs explicit notification.
-	let contentBumpScheduled = false;
-
-	function bumpContent() {
-		if (contentBumpScheduled) return;
-		contentBumpScheduled = true;
-		requestAnimationFrame(() => {
-			contentBumpScheduled = false;
-			if (!activePath.length || !messagesEl || !autoScroll) return;
-			scrollToBottom();
-		});
-	}
-
-	// Set whenever we assign scrollTop ourselves, so the scroll handler can
-	// ignore the resulting scroll event.
-	let programmaticScroll = false;
-
 	function scrollToBottom() {
 		if (!messagesEl) return;
-		programmaticScroll = true;
 		messagesEl.scrollTop = messagesEl.scrollHeight;
 		// Follow-up scroll to account for content-visibility re-layouts
 		requestAnimationFrame(() => {
-			if (messagesEl && autoScroll) {
-				programmaticScroll = true;
+			if (messagesEl) {
 				messagesEl.scrollTop = messagesEl.scrollHeight;
 			}
 		});
@@ -1134,77 +1088,25 @@
 
 	function handleMessagesScroll() {
 		if (!messagesEl) return;
-		const { scrollTop } = messagesEl;
-
-		// Ignore scrolls we caused ourselves: our own pinning must not
-		// re-engage auto-scroll (which previously made it impossible to
-		// scroll up during streaming), and skipping the
-		// scrollHeight/clientHeight reads avoids a forced layout on every
-		// programmatic scroll event.
-		if (programmaticScroll) {
-			programmaticScroll = false;
-			lastScrollTop = scrollTop;
-			return;
-		}
+		const { scrollTop, scrollHeight, clientHeight } = messagesEl;
 
 		// If the user scrolled upward, immediately disengage auto-scroll
 		if (scrollTop < lastScrollTop) {
 			autoScroll = false;
-			lastScrollTop = scrollTop;
-			return;
+		} else {
+			// Re-engage only when very close to the bottom
+			autoScroll = scrollHeight - scrollTop <= clientHeight + 200;
 		}
 
-		// Equal position: pin aftermath with no user movement — must not
-		// re-engage auto-scroll (that is what kept the pin latched against
-		// momentum scrolling).
-		if (scrollTop === lastScrollTop) return;
-
-		// Re-engage only when very close to the bottom
-		const { scrollHeight, clientHeight } = messagesEl;
-		autoScroll = scrollHeight - scrollTop <= clientHeight + 200;
 		lastScrollTop = scrollTop;
 	}
 
-	// Intent-based unpin: scroll-event direction checks are unreliable during
-	// momentum scrolling — a programmatic pin can emit extra scroll events,
-	// and the pin's "swallow next event" flag can eat the user's upward event,
-	// leaving the view latched to the bottom. Touch/wheel intent fires before
-	// those events and cannot be swallowed, so an upward gesture always wins.
-	let lastTouchY: number | null = null;
-
-	function onMessagesTouchMove(e: TouchEvent) {
-		const y = e.touches[0]?.clientY;
-		if (y == null || lastTouchY == null) {
-			lastTouchY = y;
-			return;
-		}
-		const dy = y - lastTouchY;
-		lastTouchY = y;
-		// Upward drag (finger moves up => clientY grows) unpins.
-		if (dy > 4) autoScroll = false;
-	}
-
-	function onMessagesTouchEnd() {
-		lastTouchY = null;
-	}
-
-	function onMessagesWheel(e: WheelEvent) {
-		if (e.deltaY < 0) autoScroll = false;
-	}
-
 	$effect(() => {
-		const el = messagesEl;
-		if (!el) return;
-		el.addEventListener('touchmove', onMessagesTouchMove, { passive: true });
-		el.addEventListener('touchend', onMessagesTouchEnd, { passive: true });
-		el.addEventListener('touchcancel', onMessagesTouchEnd, { passive: true });
-		el.addEventListener('wheel', onMessagesWheel, { passive: true });
-		return () => {
-			el.removeEventListener('touchmove', onMessagesTouchMove);
-			el.removeEventListener('touchend', onMessagesTouchEnd);
-			el.removeEventListener('touchcancel', onMessagesTouchEnd);
-			el.removeEventListener('wheel', onMessagesWheel);
-		};
+		if (activePath.length && messagesEl && autoScroll) {
+			requestAnimationFrame(() => {
+				scrollToBottom();
+			});
+		}
 	});
 
 	// ── Actions ─────────────────────────────────────────────────
@@ -1275,7 +1177,7 @@
 			const behavior = get(streamingBehavior);
 			if (behavior === 'interrupt') {
 				// Cancel active generation, then fall through to normal send
-				const active = allMessages.find((m) => m.role === 'assistant' && !m.done);
+				const active = allMessages.findLast((m) => m.role === 'assistant' && !m.done);
 				if (active) {
 					try {
 						await cancelTask(chatId, active.id);
@@ -1501,7 +1403,7 @@
 	async function handleQueueEdit(messageId: string) {
 		if (!chatId) return;
 		// Move content back to input, delete from queue
-		const msg = allMessages.find((m) => m.id === messageId);
+		const msg = allMessages.findLast((m) => m.id === messageId);
 		if (msg) {
 			inputText = msg.content;
 			chatInputEl?.focus();
@@ -1525,7 +1427,7 @@
 	}
 
 	async function handleCancel() {
-		const active = allMessages.find((m) => m.role === 'assistant' && !m.done);
+		const active = allMessages.findLast((m) => m.role === 'assistant' && !m.done);
 		if (!active || !chatId) return;
 		stopTtsPlayback();
 
@@ -1564,7 +1466,7 @@
 		}
 
 		active.done = true;
-		bumpContent();
+		allMessages = [...allMessages];
 
 		try {
 			await cancelTask(chatId, active.id);
@@ -1577,7 +1479,7 @@
 		if (!chatId) return;
 
 		// Optimistically update local state so Allow/Deny buttons disappear immediately
-		const msg = allMessages.find((m) => m.id === messageId);
+		const msg = allMessages.findLast((m) => m.id === messageId);
 		if (msg?.output) {
 			const call = msg.output.find(
 				(item: any) =>
@@ -1586,6 +1488,7 @@
 			if (call) {
 				call.status = approved ? 'queued' : 'rejected';
 				if (approved) call.approved = true;
+				allMessages = [...allMessages]; // trigger reactivity
 			}
 		}
 
@@ -1641,7 +1544,7 @@
 	}
 
 	async function handleRegenerate(messageId: string) {
-		const msg = allMessages.find((m) => m.id === messageId);
+		const msg = allMessages.findLast((m) => m.id === messageId);
 		if (!msg?.parent_id || !chatId || !selectedModel) return;
 
 		try {
@@ -1668,7 +1571,7 @@
 		output: any[] | null,
 		submit: boolean
 	) {
-		const msg = allMessages.find((m) => m.id === messageId);
+		const msg = allMessages.findLast((m) => m.id === messageId);
 		if (!msg || !chatId) return;
 
 		if (!submit) {
@@ -1825,7 +1728,7 @@
 		if (!shouldStreamTts()) return;
 		if (!delta.trim()) return;
 
-		const active = allMessages.find((m) => m.id === messageId);
+		const active = allMessages.findLast((m) => m.id === messageId);
 		if (!active || active.role !== 'assistant') return;
 
 		const speakable = stripCodeFenceDelta(delta);
@@ -1877,7 +1780,7 @@
 	}
 
 	function speakMessage(messageId: string) {
-		const msg = allMessages.find((m) => m.id === messageId && m.role === 'assistant');
+		const msg = allMessages.findLast((m) => m.id === messageId && m.role === 'assistant');
 		if (!msg || !$ttsEnabled || !$ttsConfigured) return;
 		const text = getAssistantSpeechText(msg);
 		if (!text) return;
@@ -2348,14 +2251,3 @@
 		}}
 	/>
 {/if}
-
-<style>
-	/* Off-screen message rows skip layout/paint (large conversations can
-	   have thousands of rows). Each row's real size is remembered after its
-	   first render (the `auto` intrinsic-size keyword), so the scroll
-	   estimate converges as the user navigates. */
-	.chat-row {
-		content-visibility: auto;
-		contain-intrinsic-size: auto 96px;
-	}
-</style>
