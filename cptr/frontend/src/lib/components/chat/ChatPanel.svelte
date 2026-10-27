@@ -689,10 +689,12 @@
 		chat_id: string;
 		message_id?: string;
 		parent_id?: string | null;
+		row_id?: string;
 		role?: string;
 		meta?: Record<string, any> | null;
 		delta?: string;
 		output?: any;
+		chat_summary?: string | null;
 		tasks?: ChatTask[];
 		context_usage?: ContextUsage | null;
 		done?: boolean;
@@ -802,6 +804,17 @@
 			}
 			currentMessageId = data.message_id;
 			contentVersion++;
+			return;
+		}
+
+		// Auto-compaction committed mid-task: mark the checkpoint row so the
+		// compaction indicator appears without waiting for a reload.
+		if (data.type === 'message_compacted' && data.row_id) {
+			const compactedRow = allMessages.find((m) => m.id === data.row_id);
+			if (compactedRow) {
+				compactedRow.compacted = true;
+				compactedRow.chat_summary = data.chat_summary ?? null;
+			}
 			return;
 		}
 

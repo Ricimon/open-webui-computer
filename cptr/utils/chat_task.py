@@ -2402,6 +2402,13 @@ async def run_chat_task(
                 )
                 await ChatMessage.update(checkpoint_message_id, chat_summary=summary)
                 loaded_summary = summary
+                # Tell connected clients where the checkpoint landed so the
+                # compaction indicator can appear mid-task without a reload.
+                await emit(
+                    type="message_compacted",
+                    row_id=checkpoint_message_id,
+                    chat_summary=summary,
+                )
 
                 # Append summary to system prompt (works for all providers)
                 memory_message, memory_files = _memory_recall_inputs(keep_zone, regeneration_prompt)
