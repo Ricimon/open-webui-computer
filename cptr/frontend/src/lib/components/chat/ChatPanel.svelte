@@ -348,6 +348,22 @@
 		return Object.keys(acc).length ? acc : null;
 	}
 
+	// Per-row memoization of the tagged output used to merge multi-step
+	// series. Rows are immutable once done, so only the streaming row
+	// recomputes per token; without this every token shallow-copies every
+	// item in the whole series. Cleared in loadChat (fresh rows from the API
+	// and possible id reuse across chats).
+	const rowMergeCache = new Map<string, { output: any[] | null; tagged: any[] }>();
+
+	function taggedRowOutput(r: ChatMessageRow): any[] {
+		const out = r.output ?? null;
+		const cached = rowMergeCache.get(r.id);
+		if (cached && cached.output === out) return cached.tagged;
+		const tagged = out ? out.map((item: any) => ({ ...item, _rowId: r.id })) : [];
+		rowMergeCache.set(r.id, { output: out, tagged });
+		return tagged;
+	}
+
 	function buildDisplayUnits(entries: PathEntry[]): DisplayUnit[] {
 		const units: DisplayUnit[] = [];
 		for (const entry of entries) {
@@ -381,7 +397,7 @@
 			unit.content = unit.rows.map((r) => r.content ?? '').join('');
 			// Tag each item with its source row so the compaction icon can
 			// anchor mid-series and tool approval routes to the owning row.
-			unit.output = unit.rows.flatMap((r) => (r.output ?? []).map((item: any) => ({ ...item, _rowId: r.id })));
+			unit.output = unit.rows.flatMap((r) => taggedRowOutput(r));
 			unit.done = unit.rows[unit.rows.length - 1].done;
 			unit.usage = mergeUnitUsage(unit.rows);
 			const summaryRows = unit.rows.filter((r) => r.chat_summary);
@@ -528,6 +544,7 @@
 			// Discard stale response if a newer loadChat was called while we waited
 			if (gen !== loadGeneration) return;
 			allMessages = data.messages;
+			rowMergeCache.clear();
 			loadChatSettings(data.chat.meta);
 			currentMessageId = data.chat.current_message_id;
 			contextUsage = data.context_usage ?? null;
@@ -803,7 +820,7 @@
 				];
 			}
 			currentMessageId = data.message_id;
-			contentVersion++;
+			bumpContent();
 			return;
 		}
 
@@ -823,10 +840,10 @@
 
 		if (data.delta) {
 			// In-place mutation: the $state proxy already tracks it, so no
-			// array reassignment is needed. Bump contentVersion to drive the
-			// auto-scroll pin.
+			// array reassignment is needed. Bump content (coalesced per frame)
+			// to drive the auto-scroll pin.
 			msg.content += data.delta;
-			contentVersion++;
+			bumpContent();
 			handleTtsDelta(data.message_id, data.delta);
 		}
 		if (data.output) {
@@ -865,7 +882,7 @@
 			} else {
 				msg.output = [...existing, data.output];
 			}
-			contentVersion++;
+			bumpContent();
 		}
 		if (data.error) {
 			toast.error(data.error, { duration: 8000 });
@@ -891,7 +908,7 @@
 			// the DB reload returns. This avoids a transient blank message if the
 			// final `done` socket event beats the commit/read path.
 			msg.done = true;
-			contentVersion++;
+			bumpContent();
 			if (chatTasks.some((task) => task.status === 'pending' || task.status === 'in_progress')) {
 				setChatTasks([]);
 			}
@@ -1079,11 +1096,22 @@
 
 	// ── Auto-scroll ─────────────────────────────────────────────
 
-	// Bumped whenever visible message content changes (streaming deltas,
-	// new output items, message completion). Drives the bottom-pin without
-	// relying on allMessages identity: in-place $state mutations are already
-	// reactive, and the O(n) tree-walk deriveds no longer re-run per token.
-	let contentVersion = $state(0);
+	// Content-growth signal for the bottom-pin, coalesced per animation
+	// frame: N socket events within one frame produce a single pin attempt
+	// (and a single forced layout), not one per event. In-place $state
+	// mutations are already reactive for rendering; only the scroll pin
+	// needs explicit notification.
+	let contentBumpScheduled = false;
+
+	function bumpContent() {
+		if (contentBumpScheduled) return;
+		contentBumpScheduled = true;
+		requestAnimationFrame(() => {
+			contentBumpScheduled = false;
+			if (!activePath.length || !messagesEl || !autoScroll) return;
+			scrollToBottom();
+		});
+	}
 
 	// Set whenever we assign scrollTop ourselves, so the scroll handler can
 	// ignore the resulting scroll event.
@@ -1126,23 +1154,57 @@
 			return;
 		}
 
+		// Equal position: pin aftermath with no user movement — must not
+		// re-engage auto-scroll (that is what kept the pin latched against
+		// momentum scrolling).
+		if (scrollTop === lastScrollTop) return;
+
 		// Re-engage only when very close to the bottom
 		const { scrollHeight, clientHeight } = messagesEl;
 		autoScroll = scrollHeight - scrollTop <= clientHeight + 200;
 		lastScrollTop = scrollTop;
 	}
 
-	$effect(() => {
-		void contentVersion; // track per-token content growth
-		if (activePath.length && messagesEl && autoScroll) {
-			// Re-check inside the frame: the user may have scrolled up
-			// after this effect ran but before the rAF fired.
-			requestAnimationFrame(() => {
-				if (autoScroll) {
-					scrollToBottom();
-				}
-			});
+	// Intent-based unpin: scroll-event direction checks are unreliable during
+	// momentum scrolling — a programmatic pin can emit extra scroll events,
+	// and the pin's "swallow next event" flag can eat the user's upward event,
+	// leaving the view latched to the bottom. Touch/wheel intent fires before
+	// those events and cannot be swallowed, so an upward gesture always wins.
+	let lastTouchY: number | null = null;
+
+	function onMessagesTouchMove(e: TouchEvent) {
+		const y = e.touches[0]?.clientY;
+		if (y == null || lastTouchY == null) {
+			lastTouchY = y;
+			return;
 		}
+		const dy = y - lastTouchY;
+		lastTouchY = y;
+		// Upward drag (finger moves up => clientY grows) unpins.
+		if (dy > 4) autoScroll = false;
+	}
+
+	function onMessagesTouchEnd() {
+		lastTouchY = null;
+	}
+
+	function onMessagesWheel(e: WheelEvent) {
+		if (e.deltaY < 0) autoScroll = false;
+	}
+
+	$effect(() => {
+		const el = messagesEl;
+		if (!el) return;
+		el.addEventListener('touchmove', onMessagesTouchMove, { passive: true });
+		el.addEventListener('touchend', onMessagesTouchEnd, { passive: true });
+		el.addEventListener('touchcancel', onMessagesTouchEnd, { passive: true });
+		el.addEventListener('wheel', onMessagesWheel, { passive: true });
+		return () => {
+			el.removeEventListener('touchmove', onMessagesTouchMove);
+			el.removeEventListener('touchend', onMessagesTouchEnd);
+			el.removeEventListener('touchcancel', onMessagesTouchEnd);
+			el.removeEventListener('wheel', onMessagesWheel);
+		};
 	});
 
 	// ── Actions ─────────────────────────────────────────────────
@@ -1502,7 +1564,7 @@
 		}
 
 		active.done = true;
-		contentVersion++;
+		bumpContent();
 
 		try {
 			await cancelTask(chatId, active.id);
