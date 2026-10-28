@@ -306,23 +306,6 @@
 	// into a single visible message (merged output in chain order); the raw
 	// rows stay intact for fork/edit/approve targeting.
 
-	interface DisplayUnit {
-		id: string; // first row id (stable key + sibling-nav anchor)
-		role: 'user' | 'assistant';
-		rows: ChatMessageRow[];
-		content: string;
-		output: any[] | null;
-		done: boolean;
-		usage: Record<string, number> | null;
-		compacted: boolean;
-		compactedSummary: string | null;
-		compactedRowId: string | null;
-		multiStep: boolean;
-		createdAt?: number | null;
-		siblingIds: string[];
-		siblingIndex: number;
-	}
-
 	function seriesRootOf(msg: ChatMessageRow): string {
 		const root = msg.meta?.task_root;
 		return typeof root === 'string' && root ? root : msg.id;
@@ -348,48 +331,135 @@
 		return Object.keys(acc).length ? acc : null;
 	}
 
+	// Unit objects are rebuilt only when the path structure changes (row
+	// identity, chaining, roles, metadata). The hot fields (content/output/
+	// done/usage/compaction) are getters over the row proxies: a streaming
+	// delta invalidates only the effects of the unit whose row changed, so an
+	// unchanged visible unit keeps identical prop values and its component is
+	// skipped instead of being reconciled on every event.
+
+	const EMPTY_OUTPUT: any[] = [];
+
+	class DisplayUnit {
+		id: string; // first row id (stable key + sibling-nav anchor)
+		role: 'user' | 'assistant';
+		rows: ChatMessageRow[];
+		multiStep = false;
+		createdAt?: number | null;
+		siblingIds: string[];
+		siblingIndex: number;
+		private _itemCache: Map<ChatMessageRow, { source: any[]; items: any[] }> | null = null;
+		private _mergedOutput: any[] | null = null;
+
+		constructor(msg: ChatMessageRow, entry: PathEntry) {
+			this.id = msg.id;
+			this.role = msg.role;
+			this.rows = [msg];
+			this.createdAt = msg.created_at ?? null;
+			this.siblingIds = entry.siblingIds;
+			this.siblingIndex = entry.siblingIndex;
+		}
+
+		get content(): string {
+			if (this.rows.length === 1) return this.rows[0].content;
+			return this.rows.map((r) => r.content ?? '').join('');
+		}
+
+		// Multi-step output merges items from every step row in chain order and
+		// tags each with its source row so the compaction icon can anchor
+		// mid-series and tool approval routes to the owning row. The merge is
+		// memoized per unit instance: rows are fixed once constructed, and a
+		// row's output array identity only changes on a real output event, so a
+		// unit whose rows didn't change returns the same array reference and
+		// its component re-renders nothing.
+		get output(): any[] | null {
+			if (!this.multiStep) return this.rows[0].output ?? null;
+			if (this._mergedOutput && !this._outputChanged()) return this._mergedOutput;
+			// Reuse the existing per-row cache so rows whose output array didn't
+			// change keep their tagged item objects — only the changed row's items
+			// get new identities, and downstream keyed blocks skip the rest.
+			const cache = this._itemCache ?? new Map<ChatMessageRow, { source: any[]; items: any[] }>();
+			const merged: any[] = [];
+			for (const row of this.rows) {
+				const current = row.output ?? EMPTY_OUTPUT;
+				let entry = cache.get(row);
+				if (!entry || entry.source !== current) {
+					entry = {
+						source: current,
+						items: current.map((item: any) => ({ ...item, _rowId: row.id }))
+					};
+					cache.set(row, entry);
+				}
+				for (let i = 0; i < entry.items.length; i++) merged.push(entry.items[i]);
+			}
+			this._itemCache = cache;
+			this._mergedOutput = merged;
+			return this._mergedOutput;
+		}
+
+		private _outputChanged(): boolean {
+			if (!this._itemCache) return true;
+			for (const row of this.rows) {
+				const entry = this._itemCache.get(row);
+				if (!entry || entry.source !== (row.output ?? EMPTY_OUTPUT)) return true;
+			}
+			return false;
+		}
+
+		get done(): boolean {
+			return this.rows[this.rows.length - 1].done;
+		}
+
+		get usage(): Record<string, number> | null {
+			if (!this.multiStep) return this.rows[0].usage;
+			return mergeUnitUsage(this.rows);
+		}
+
+		get compacted(): boolean {
+			if (!this.multiStep) return Boolean(this.rows[0].compacted);
+			if (this._lastSummaryRow()) return true;
+			// No summary anywhere: same fallback as a single-row unit built from
+			// the series' first row.
+			return Boolean(this.rows[0].compacted);
+		}
+
+		get compactedSummary(): string | null {
+			if (!this.multiStep) return this.rows[0].chat_summary ?? null;
+			const last = this._lastSummaryRow();
+			return (last ? last.chat_summary : this.rows[0].chat_summary) ?? null;
+		}
+
+		get compactedRowId(): string | null {
+			if (!this.multiStep) return null;
+			return this._lastSummaryRow()?.id ?? null;
+		}
+
+		private _lastSummaryRow(): ChatMessageRow | null {
+			let found: ChatMessageRow | null = null;
+			for (const r of this.rows) if (r.chat_summary) found = r;
+			return found;
+		}
+	}
+
 	function buildDisplayUnits(entries: PathEntry[]): DisplayUnit[] {
 		const units: DisplayUnit[] = [];
 		for (const entry of entries) {
 			const msg = entry.msg;
 			const prev = units.length ? units[units.length - 1] : null;
-			if (msg.role === 'assistant' && prev?.role === 'assistant' && continuesUnit(prev.rows[prev.rows.length - 1], msg)) {
+			if (
+				msg.role === 'assistant' &&
+				prev?.role === 'assistant' &&
+				continuesUnit(prev.rows[prev.rows.length - 1], msg)
+			) {
 				prev.rows.push(msg);
 				continue;
 			}
-			units.push({
-				id: msg.id,
-				role: msg.role,
-				rows: [msg],
-				content: msg.content,
-				output: msg.output ?? null,
-				done: msg.done,
-				usage: msg.usage,
-				compacted: Boolean(msg.compacted),
-				compactedSummary: msg.chat_summary ?? null,
-				compactedRowId: null,
-				multiStep: false,
-				createdAt: msg.created_at ?? null,
-				siblingIds: entry.siblingIds,
-				siblingIndex: entry.siblingIndex
-			});
+			units.push(new DisplayUnit(msg, entry));
 		}
 
 		for (const unit of units) {
 			if (unit.role !== 'assistant' || unit.rows.length < 2) continue;
 			unit.multiStep = true;
-			unit.content = unit.rows.map((r) => r.content ?? '').join('');
-			// Tag each item with its source row so the compaction icon can
-			// anchor mid-series and tool approval routes to the owning row.
-			unit.output = unit.rows.flatMap((r) => (r.output ?? []).map((item: any) => ({ ...item, _rowId: r.id })));
-			unit.done = unit.rows[unit.rows.length - 1].done;
-			unit.usage = mergeUnitUsage(unit.rows);
-			const summaryRows = unit.rows.filter((r) => r.chat_summary);
-			if (summaryRows.length) {
-				unit.compacted = true;
-				unit.compactedSummary = summaryRows[summaryRows.length - 1].chat_summary ?? null;
-				unit.compactedRowId = summaryRows[summaryRows.length - 1].id;
-			}
 		}
 		return units;
 	}
