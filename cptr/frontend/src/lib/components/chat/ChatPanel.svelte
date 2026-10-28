@@ -321,16 +321,6 @@
 		return seriesRootOf(prev) === root;
 	}
 
-	function mergeUnitUsage(rows: ChatMessageRow[]): Record<string, number> | null {
-		const acc: Record<string, number> = {};
-		for (const r of rows) {
-			for (const [k, v] of Object.entries(r.usage ?? {})) {
-				if (typeof v === 'number') acc[k] = (acc[k] ?? 0) + v;
-			}
-		}
-		return Object.keys(acc).length ? acc : null;
-	}
-
 	// Unit objects are rebuilt only when the path structure changes (row
 	// identity, chaining, roles, metadata). The hot fields (content/output/
 	// done/usage/compaction) are getters over the row proxies: a streaming
@@ -410,9 +400,18 @@
 			return this.rows[this.rows.length - 1].done;
 		}
 
+		// Multi-step units show the final step's provider snapshot (input =
+		// full context at that point), never a per-row sum — summed
+		// input_tokens would count the whole context once per step. Walk back
+		// from the last row so providers that omit usage on some steps still
+		// display the newest available snapshot.
 		get usage(): Record<string, number> | null {
 			if (!this.multiStep) return this.rows[0].usage;
-			return mergeUnitUsage(this.rows);
+			for (let i = this.rows.length - 1; i >= 0; i--) {
+				const u = this.rows[i].usage;
+				if (u && Object.keys(u).length > 0) return u;
+			}
+			return null;
 		}
 
 		get compacted(): boolean {
