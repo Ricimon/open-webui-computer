@@ -31,7 +31,7 @@ https://www.ricimon.com/setting-up-a-local-ai-workspace/
 
 <br>
 
-# Original Project README
+# Original Project Readme
 
 ![GitHub stars](https://img.shields.io/github/stars/open-webui/computer?style=social)
 ![GitHub forks](https://img.shields.io/github/forks/open-webui/computer?style=social)
