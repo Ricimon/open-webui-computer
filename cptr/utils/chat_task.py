@@ -1362,6 +1362,11 @@ def _row_task_root(message: dict) -> str | None:
     return None
 
 
+def _strip_internal_fields(messages: list[dict]) -> list[dict]:
+    """Drop internal-only keys (row id, series meta) before provider send."""
+    return [{k: v for k, v in m.items() if k not in ("id", "meta")} for m in messages]
+
+
 def _find_safe_split(messages: list[dict], target_keep: int) -> int:
     """Find a safe split index that doesn't break tool call pairs.
 
@@ -2487,7 +2492,7 @@ async def run_chat_task(
                             ],
                         }
                     )
-            api_messages = [{k: v for k, v in m.items() if k != "id"} for m in api_messages]
+            api_messages = _strip_internal_fields(api_messages)
 
             form_data = ChatCompletionForm(
                 model=model,
@@ -2702,6 +2707,11 @@ async def run_chat_task(
                                 result_item,
                             ]
                         )
+                        # Live entries need row identity so mid-task compaction can
+                        # anchor on this series (untagged fall back to user prompt).
+                        for e in new_messages:
+                            e["id"] = message_id
+                            e["meta"] = {"task_root": series_root_id}
                         messages.extend(new_messages)
                         new_messages_since += len(new_messages)
                         await _save_message(
@@ -2967,6 +2977,11 @@ async def run_chat_task(
                         *delegate_result_items,
                     ]
                 )
+                # Live entries need row identity so mid-task compaction can
+                # anchor on this series (untagged fall back to user prompt).
+                for e in new_messages:
+                    e["id"] = message_id
+                    e["meta"] = {"task_root": series_root_id}
                 messages.extend(new_messages)
                 new_messages_since += len(new_messages)
 
