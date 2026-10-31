@@ -912,6 +912,7 @@ def _output_items_to_messages(
     pending_reasoning_items: list[dict] = []
     pending_tool_calls: list[dict] = []
     call_names: dict[str, str] = {}
+    call_args: dict[str, dict] = {}
 
     def flush_pending() -> None:
         nonlocal pending_content, pending_reasoning_items, pending_tool_calls
@@ -979,6 +980,14 @@ def _output_items_to_messages(
             if item.get("fc_id"):
                 tc["fc_id"] = item["fc_id"]
             call_names[call_id] = item.get("name", "")
+            parsed_args = item.get("arguments", {})
+            if isinstance(parsed_args, str):
+                try:
+                    parsed_args = json.loads(parsed_args)
+                except (json.JSONDecodeError, TypeError):
+                    parsed_args = {}
+            if isinstance(parsed_args, dict):
+                call_args[call_id] = parsed_args
             pending_tool_calls.append(tc)
         elif itype == "function_call_output" and item.get("call_id") not in native_agent_call_ids:
             call_id = item.get("call_id")
@@ -991,6 +1000,7 @@ def _output_items_to_messages(
                 "content": _tool_result_for_model(
                     call_names.get(call_id, ""),
                     item.get("output", ""),
+                    call_args.get(call_id),
                 ),
             }
             if message_id:
@@ -1194,8 +1204,24 @@ def _parse_image_data_uri(result: str) -> tuple[str, str] | None:
         return None
 
 
-def _tool_result_for_model(tool_name: str, result: str) -> str:
-    """Return the tool result text to send back to the model."""
+def _tool_result_for_model(
+    tool_name: str, result: str, arguments: dict | None = None
+) -> str | list[dict]:
+    """Return the tool result content to send back to the model.
+
+    Image data URIs (read_file on image files) become multimodal blocks so
+    vision models can see the pixels; all other results stay plain text.
+    """
+    if isinstance(result, str):
+        if parsed := _parse_image_data_uri(result):
+            media_type, b64_data = parsed
+            path = str((arguments or {}).get("path") or "").strip()
+            label = f"Image loaded: {path}. " if path else "Image loaded. "
+            return [
+                {"type": "text", "text": label},
+                {"type": "image", "media_type": media_type, "base64": b64_data},
+            ]
+
     if tool_name != "image_generate":
         return result
 
@@ -1352,16 +1378,6 @@ def _append_prompt_suffix(messages: list[dict], suffix: str) -> None:
         return
 
 
-def _row_task_root(message: dict) -> str | None:
-    """meta.task_root of a message row, if it belongs to a step series."""
-    meta = message.get("meta")
-    if isinstance(meta, dict):
-        root = meta.get("task_root")
-        if isinstance(root, str) and root:
-            return root
-    return None
-
-
 def _strip_internal_fields(messages: list[dict]) -> list[dict]:
     """Drop internal-only keys (row id, series meta) before provider send."""
     return [{k: v for k, v in m.items() if k not in ("id", "meta")} for m in messages]
@@ -1373,28 +1389,21 @@ def _find_safe_split(messages: list[dict], target_keep: int) -> int:
     Returns the index where keep_zone starts. Ensures:
     - Never splits between an assistant tool_call and its tool result
     - keep_zone doesn't start with a tool result message
-    - keep_zone doesn't start mid-series (step rows of one assistant task are
-      merged into one visible message; the boundary must fall before the
-      series, not inside it)
     - At least 2 messages are kept
+
+    Step rows of one assistant task may be split: each row co-locates a
+    generation's tool calls with their results, so any boundary that doesn't
+    start on a tool result is pair-safe. Allowing mid-series boundaries is
+    what lets mid-task compaction trim the running task's own older steps
+    instead of only pre-task history (which made compaction a no-op once the
+    series dominated the context).
     """
     n = len(messages)
     split = min(max(2, n - target_keep), max(0, n - 2))
 
-    while split > 0:
-        message = messages[split]
-        # Don't start keep_zone with a tool result; keep its assistant call too.
-        if message.get("role") == "tool":
-            split -= 1
-            continue
-        # Don't start keep_zone on a mid-series step row: jump back to the
-        # first row of that series and re-validate from there.
-        root = _row_task_root(message)
-        if root and any(_row_task_root(m) == root for m in messages[:split]):
-            while split > 0 and _row_task_root(messages[split - 1]) == root:
-                split -= 1
-            continue
-        break
+    # Don't start keep_zone with a tool result; keep its assistant call too.
+    while split > 0 and messages[split].get("role") == "tool":
+        split -= 1
 
     return split
 
@@ -2395,70 +2404,80 @@ async def run_chat_task(
                 drop_zone = messages[:split_idx]
                 keep_zone = messages[split_idx:]
 
-                summary = await summarize_messages(
-                    drop_zone,
-                    loaded_summary,
-                    connection,
-                    model,
-                )
+                if not drop_zone:
+                    # Tool-pair alignment walked the boundary back to the very
+                    # start: nothing is older than the keep zone, so this pass
+                    # cannot shrink the context. Skip rather than write a
+                    # checkpoint that would truncate the whole history on reload.
+                    logger.warning(
+                        "[task %s] compaction boundary hit the start; nothing to drop",
+                        message_id[:8],
+                    )
+                else:
+                    summary = await summarize_messages(
+                        drop_zone,
+                        loaded_summary,
+                        connection,
+                        model,
+                    )
 
-                checkpoint_message_id = _summary_checkpoint_message_id(
-                    keep_zone, summary_message_id
-                )
-                await ChatMessage.update(checkpoint_message_id, chat_summary=summary)
-                loaded_summary = summary
-                # Tell connected clients where the checkpoint landed so the
-                # compaction indicator can appear mid-task without a reload.
-                await emit(
-                    type="message_compacted",
-                    row_id=checkpoint_message_id,
-                    chat_summary=summary,
-                )
+                    checkpoint_message_id = _summary_checkpoint_message_id(
+                        keep_zone, summary_message_id
+                    )
+                    await ChatMessage.update(checkpoint_message_id, chat_summary=summary)
+                    loaded_summary = summary
+                    # Tell connected clients where the checkpoint landed so the
+                    # compaction indicator can appear mid-task without a reload.
+                    await emit(
+                        type="message_compacted",
+                        row_id=checkpoint_message_id,
+                        chat_summary=summary,
+                    )
 
-                # Append summary to system prompt (works for all providers)
-                memory_message, memory_files = _memory_recall_inputs(keep_zone, regeneration_prompt)
-                system = await _load_system_prompt(
-                    request,
-                    workspace,
-                    model,
-                    user_id=user_id,
-                    current_message=memory_message,
-                    recent_messages=keep_zone,
-                    mentioned_files=memory_files,
-                )
-                system += f"\n\n[CONVERSATION SUMMARY]\n{summary}"
-                # Re-inject attached skills after compaction (protect from pruning)
-                if attached_skill_ids:
-                    skill_blocks = []
-                    for sid in attached_skill_ids:
-                        skill = load_skill(workspace, sid)
-                        if skill:
-                            skill_blocks.append(format_skill_content(skill))
-                    if skill_blocks:
-                        system += "\n\n" + "\n\n".join(skill_blocks)
-                system = await _apply_voice_mode_system_prompt(system, chat_params)
-                # Keep the prompt that started this task in the user content
-                # (the checkpoint above is already written, so its position is
-                # unchanged; the prompt also remains captured in the summary).
-                current_prompt_kept = (
-                    summary_message_id != message_id
-                    and not any(m.get("id") == summary_message_id for m in keep_zone)
-                )
-                messages = await _ensure_current_prompt(
-                    keep_zone, chat_id, summary_message_id, message_id, source=drop_zone
-                )
-                last_usage = None  # reset after compaction
-                new_messages_since = 0
+                    # Append summary to system prompt (works for all providers)
+                    memory_message, memory_files = _memory_recall_inputs(keep_zone, regeneration_prompt)
+                    system = await _load_system_prompt(
+                        request,
+                        workspace,
+                        model,
+                        user_id=user_id,
+                        current_message=memory_message,
+                        recent_messages=keep_zone,
+                        mentioned_files=memory_files,
+                    )
+                    system += f"\n\n[CONVERSATION SUMMARY]\n{summary}"
+                    # Re-inject attached skills after compaction (protect from pruning)
+                    if attached_skill_ids:
+                        skill_blocks = []
+                        for sid in attached_skill_ids:
+                            skill = load_skill(workspace, sid)
+                            if skill:
+                                skill_blocks.append(format_skill_content(skill))
+                        if skill_blocks:
+                            system += "\n\n" + "\n\n".join(skill_blocks)
+                    system = await _apply_voice_mode_system_prompt(system, chat_params)
+                    # Keep the prompt that started this task in the user content
+                    # (the checkpoint above is already written, so its position is
+                    # unchanged; the prompt also remains captured in the summary).
+                    current_prompt_kept = (
+                        summary_message_id != message_id
+                        and not any(m.get("id") == summary_message_id for m in keep_zone)
+                    )
+                    messages = await _ensure_current_prompt(
+                        keep_zone, chat_id, summary_message_id, message_id, source=drop_zone
+                    )
+                    last_usage = None  # reset after compaction
+                    new_messages_since = 0
 
-                logger.info(
-                    "[task %s] compacted: checkpoint=%s dropped %d msgs, kept %d, summary=%d chars, current_prompt_kept=%s",
-                    message_id[:8],
-                    checkpoint_message_id[:8],
-                    len(drop_zone),
-                    len(keep_zone),
-                    len(summary),
-                    current_prompt_kept,
-                )
+                    logger.info(
+                        "[task %s] compacted: checkpoint=%s dropped %d msgs, kept %d, summary=%d chars, current_prompt_kept=%s",
+                        message_id[:8],
+                        checkpoint_message_id[:8],
+                        len(drop_zone),
+                        len(keep_zone),
+                        len(summary),
+                        current_prompt_kept,
+                    )
 
             # Anthropic supports images natively in tool_result content blocks.
             # Chat Completions and Responses API don't support multimodal tool messages,
@@ -2708,10 +2727,9 @@ async def run_chat_task(
                             ]
                         )
                         # Live entries need row identity so mid-task compaction can
-                        # anchor on this series (untagged fall back to user prompt).
+                        # anchor its checkpoint on the step row that owns them.
                         for e in new_messages:
                             e["id"] = message_id
-                            e["meta"] = {"task_root": series_root_id}
                         messages.extend(new_messages)
                         new_messages_since += len(new_messages)
                         await _save_message(
@@ -2978,10 +2996,9 @@ async def run_chat_task(
                     ]
                 )
                 # Live entries need row identity so mid-task compaction can
-                # anchor on this series (untagged fall back to user prompt).
+                # anchor its checkpoint on the step row that owns them.
                 for e in new_messages:
                     e["id"] = message_id
-                    e["meta"] = {"task_root": series_root_id}
                 messages.extend(new_messages)
                 new_messages_since += len(new_messages)
 

@@ -465,7 +465,10 @@ IMAGE_EXTENSIONS = {
     ".tif",
 }
 
-_IMAGE_MAX_BYTES = 5 * 1024 * 1024  # 5 MB target for API payload
+# 3 MB binary cap. The data is base64-encoded (~4/3x) and inlined into the
+# model context as an image block; keep it under ~4 MB so the base64 stays
+# within Anthropic's 5 MB per-image limit.
+_IMAGE_MAX_BYTES = 3 * 1024 * 1024
 
 _IMAGE_MIME = {
     ".png": "image/png",
@@ -529,7 +532,7 @@ def _read_image_data(data: bytes, suffix: str, path: str) -> str:
                     break
                 scale *= 0.7  # more aggressive on each pass
             else:
-                return f"Error: image too large ({_human_size(size)}) and could not be resized below 5MB."
+                return f"Error: image too large ({_human_size(size)}) and could not be resized below {_human_size(_IMAGE_MAX_BYTES)}."
         except ImportError:
             return (
                 f"Error: image file is too large ({_human_size(size)}). "

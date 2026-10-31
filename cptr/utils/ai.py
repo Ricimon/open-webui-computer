@@ -357,7 +357,10 @@ def _to_anthropic_messages(messages: list[dict]) -> list[dict]:
             continue  # system goes in body.system
 
         content = m.get("content", "")
-        if isinstance(content, list):
+        # Tool messages are converted below from the original block shape
+        # (media_type/base64 keys); skip the generic pass or its rewritten
+        # "source" dicts would be re-read with wrong keys.
+        if isinstance(content, list) and role != "tool":
             formatted_content = []
             for block in content:
                 if block.get("type") == "text":
