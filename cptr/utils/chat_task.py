@@ -906,7 +906,6 @@ async def generate_chat_title(
             messages=[{"role": "user", "content": truncated}],
             system=TITLE_PROMPT,
             max_tokens=50,
-            timeout_seconds=_STREAM_TIMEOUT,
             # Title generation must not spend tokens on reasoning; this
             # deployment's Qwen template honors enable_thinking (it ignores
             # enable_reasoning, which corrupts the template when combined).

@@ -151,7 +151,6 @@ async def summarize_messages(
                 system=system,
                 max_tokens=2000,
                 request_params={"chat_template_kwargs": {"enable_thinking": False}},
-                timeout_seconds=_STREAM_TIMEOUT,
             )
             ok, reason, cleaned = _validate_summary(result)
             if ok:
