@@ -7,7 +7,6 @@ tracks active connections and handles lifecycle management.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import Optional
 
@@ -21,7 +20,6 @@ class StdioMCPManager:
 
     def __init__(self):
         self._instances: dict[str, MCPClient] = {}  # server_id → live client
-        self._connecting: dict[str, asyncio.Future] = {}  # server_id → in-flight connect
 
     async def get_client(
         self,
@@ -32,9 +30,6 @@ class StdioMCPManager:
         cwd: str | None = None,
     ) -> MCPClient:
         """Get an existing client or spawn a new stdio MCP process.
-
-        Concurrent first-connects for the same server are coalesced into a
-        single spawn; additional callers await the in-flight connection.
 
         Args:
             server_id: Unique identifier for the server config.
@@ -55,29 +50,9 @@ class StdioMCPManager:
             await self._safe_disconnect(client)
             del self._instances[server_id]
 
-        pending = self._connecting.get(server_id)
-        if pending is not None and not pending.done():
-            return await asyncio.shield(pending)
-
-        pending = asyncio.get_running_loop().create_future()
-        self._connecting[server_id] = pending
-        try:
-            client = MCPClient()
-            await client.connect_stdio(command, args, env, cwd)
-        except BaseException as exc:
-            self._connecting.pop(server_id, None)
-            if isinstance(exc, asyncio.CancelledError):
-                pending.cancel()
-            else:
-                pending.set_exception(exc)
-                # Mark retrieved so a failure with no other awaiters does not
-                # trigger an "exception was never retrieved" warning at GC.
-                pending.exception()
-            raise
-
+        client = MCPClient()
+        await client.connect_stdio(command, args, env, cwd)
         self._instances[server_id] = client
-        pending.set_result(client)
-        self._connecting.pop(server_id, None)
         logger.info("[mcp-stdio] Spawned process for '%s'", server_id)
         return client
 

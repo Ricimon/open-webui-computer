@@ -2918,91 +2918,6 @@ def is_builtin_tool_enabled(name: str, builtin_tools: dict | None) -> bool:
 # ── External tool servers ───────────────────────────────────
 
 _tool_server_cache: dict | None = None  # {"servers": [...], "tools": {name: {server, spec}}}
-_tool_server_failed_at: dict[str, float] = {}  # server_id → monotonic time of last failed load
-_TOOL_SERVER_RETRY_INTERVAL = 30.0  # seconds before retrying a server that failed to load
-
-
-async def _load_server_specs(server: dict, tools: dict) -> bool:
-    """Populate `tools` with one server's tool specs (prefixed by server id).
-
-    Returns False if loading the server failed; no tools are added for it.
-    """
-    server_id = server.get("id", "")
-    server_type = server.get("type", "openapi")
-
-    try:
-        if server_type == "openapi":
-            from cptr.utils.openapi import fetch_openapi_spec, convert_openapi_to_tool_specs
-
-            url = server.get("url", "").rstrip("/")
-            path = server.get("path", "openapi.json")
-            if path.startswith("http"):
-                spec_url = path
-            else:
-                spec_url = f"{url}/{path.lstrip('/')}"
-
-            headers = _build_server_headers(server)
-            openapi_spec = await fetch_openapi_spec(spec_url, headers)
-            server["_openapi_spec"] = openapi_spec
-
-            for spec in convert_openapi_to_tool_specs(openapi_spec):
-                prefixed = f"{server_id}_{spec['name']}"
-                tools[prefixed] = {
-                    "server": server,
-                    "spec": {**spec, "name": prefixed},
-                    "original_name": spec["name"],
-                    "type": "openapi",
-                }
-
-        elif server_type == "mcp":
-            from cptr.utils.mcp.client import MCPClient
-
-            client = MCPClient()
-            headers = _build_server_headers(server)
-            await client.connect(server.get("url", ""), headers)
-
-            for spec in await client.list_tool_specs():
-                prefixed = f"{server_id}_{spec['name']}"
-                tools[prefixed] = {
-                    "server": server,
-                    "spec": {**spec, "name": prefixed},
-                    "original_name": spec["name"],
-                    "type": "mcp",
-                }
-
-            await client.disconnect()
-
-        elif server_type == "mcp_stdio":
-            from cptr.utils.mcp.stdio_manager import stdio_manager
-
-            command = server.get("command", "")
-            args = server.get("args", [])
-            env = server.get("env")
-            cwd = server.get("cwd")
-
-            if not command:
-                return True  # misconfigured, not a transient failure — nothing to retry
-
-            client = await stdio_manager.get_client(server_id, command, args, env, cwd)
-            for spec in await client.list_tool_specs():
-                prefixed = f"{server_id}_{spec['name']}"
-                tools[prefixed] = {
-                    "server": server,
-                    "spec": {**spec, "name": prefixed},
-                    "original_name": spec["name"],
-                    "type": "mcp_stdio",
-                }
-            # Don't disconnect — keep process alive
-
-        return True
-
-    except Exception:
-        import logging
-
-        logging.getLogger(__name__).warning(
-            "Failed to load tool server '%s'", server_id, exc_info=True
-        )
-        return False
 
 
 async def _load_tool_servers() -> dict:
@@ -3010,33 +2925,10 @@ async def _load_tool_servers() -> dict:
 
     Returns a dict with 'servers' (raw config list) and 'tools' mapping
     prefixed tool names to {server, spec, type}.
-
-    Servers that fail to load are kept out of the cache's tools but are
-    retried on a later call after _TOOL_SERVER_RETRY_INTERVAL; an explicit
-    invalidation (admin save) forces a full reload immediately. Caching the
-    partial result — instead of discarding it — keeps a transient failure
-    from permanently freezing the toolset, while the per-server throttle
-    avoids re-spawning a broken server on every message.
     """
     global _tool_server_cache
     if _tool_server_cache is not None:
-        cache = _tool_server_cache
-        now = time.monotonic()
-        for server_id, failed_at in list(_tool_server_failed_at.items()):
-            if now - failed_at < _TOOL_SERVER_RETRY_INTERVAL:
-                continue
-            server = next(
-                (s for s in cache["servers"] if s.get("id", "") == server_id), None
-            )
-            if server is None or not server.get("enabled", True):
-                # Server removed or disabled since the failure — stop tracking.
-                _tool_server_failed_at.pop(server_id, None)
-                continue
-            if await _load_server_specs(server, cache["tools"]):
-                _tool_server_failed_at.pop(server_id, None)
-            else:
-                _tool_server_failed_at[server_id] = time.monotonic()
-        return cache
+        return _tool_server_cache
 
     from cptr.models import Config
 
@@ -3047,10 +2939,79 @@ async def _load_tool_servers() -> dict:
         if not server.get("enabled", True):
             continue
 
-        if await _load_server_specs(server, tools):
-            _tool_server_failed_at.pop(server.get("id", ""), None)
-        else:
-            _tool_server_failed_at[server.get("id", "")] = time.monotonic()
+        server_id = server.get("id", "")
+        server_type = server.get("type", "openapi")
+
+        try:
+            if server_type == "openapi":
+                from cptr.utils.openapi import fetch_openapi_spec, convert_openapi_to_tool_specs
+
+                url = server.get("url", "").rstrip("/")
+                path = server.get("path", "openapi.json")
+                if path.startswith("http"):
+                    spec_url = path
+                else:
+                    spec_url = f"{url}/{path.lstrip('/')}"
+
+                headers = _build_server_headers(server)
+                openapi_spec = await fetch_openapi_spec(spec_url, headers)
+                server["_openapi_spec"] = openapi_spec
+
+                for spec in convert_openapi_to_tool_specs(openapi_spec):
+                    prefixed = f"{server_id}_{spec['name']}"
+                    tools[prefixed] = {
+                        "server": server,
+                        "spec": {**spec, "name": prefixed},
+                        "original_name": spec["name"],
+                        "type": "openapi",
+                    }
+
+            elif server_type == "mcp":
+                from cptr.utils.mcp.client import MCPClient
+
+                client = MCPClient()
+                headers = _build_server_headers(server)
+                await client.connect(server.get("url", ""), headers)
+
+                for spec in await client.list_tool_specs():
+                    prefixed = f"{server_id}_{spec['name']}"
+                    tools[prefixed] = {
+                        "server": server,
+                        "spec": {**spec, "name": prefixed},
+                        "original_name": spec["name"],
+                        "type": "mcp",
+                    }
+
+                await client.disconnect()
+
+            elif server_type == "mcp_stdio":
+                from cptr.utils.mcp.stdio_manager import stdio_manager
+
+                command = server.get("command", "")
+                args = server.get("args", [])
+                env = server.get("env")
+                cwd = server.get("cwd")
+
+                if not command:
+                    continue
+
+                client = await stdio_manager.get_client(server_id, command, args, env, cwd)
+                for spec in await client.list_tool_specs():
+                    prefixed = f"{server_id}_{spec['name']}"
+                    tools[prefixed] = {
+                        "server": server,
+                        "spec": {**spec, "name": prefixed},
+                        "original_name": spec["name"],
+                        "type": "mcp_stdio",
+                    }
+                # Don't disconnect — keep process alive
+
+        except Exception:
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "Failed to load tool server '%s'", server_id, exc_info=True
+            )
 
     _tool_server_cache = {"servers": servers, "tools": tools}
     return _tool_server_cache
