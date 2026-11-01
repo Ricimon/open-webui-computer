@@ -813,7 +813,6 @@ async def review_tool_approval(
         ],
         system=TOOL_APPROVAL_REVIEW_PROMPT,
         max_tokens=150,
-        timeout=20,
     )
     decision = str((parsed or {}).get("decision") or "").strip().lower()
     reason = str((parsed or {}).get("reason") or "").strip()
@@ -862,7 +861,7 @@ async def generate_chat_title(
             messages=[{"role": "user", "content": truncated}],
             system=TITLE_PROMPT,
             max_tokens=50,
-            timeout=_STREAM_TIMEOUT,
+            timeout_seconds=_STREAM_TIMEOUT,
             # Title generation must not spend tokens on reasoning; this
             # deployment's Qwen template honors enable_thinking (it ignores
             # enable_reasoning, which corrupts the template when combined).

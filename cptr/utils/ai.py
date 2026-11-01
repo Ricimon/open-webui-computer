@@ -127,14 +127,13 @@ async def chat_completion(
     max_tokens: int = 100,
     api_type: str = "chat_completions",
     request_params: dict | None = None,
-    timeout: httpx.Timeout | None = None,
 ) -> str:
     """Simple non-streaming chat completion. Returns the text content.
 
     Works with Anthropic, OpenAI Chat Completions, and OpenAI Responses API.
     Useful for lightweight tasks like title/summary generation.
     """
-    async with httpx.AsyncClient(timeout=timeout or httpx.Timeout(15)) as client:
+    async with httpx.AsyncClient(timeout=_STREAM_TIMEOUT) as client:
         if provider == "anthropic":
             body: dict = {
                 "model": model,
@@ -245,7 +244,7 @@ async def generate_text(
     active_connection: dict | None = None,
     active_model: str = "",
     request_params: dict | None = None,
-    timeout: float | httpx.Timeout = 20,
+    timeout_seconds: float = STREAM_READ_TIMEOUT_SECONDS,
 ) -> str | None:
     """Generate text; model_id None inherits active/default."""
     from cptr.models import Config
@@ -288,12 +287,6 @@ async def generate_text(
         "openai": "https://api.openai.com/v1",
     }.get(provider, "https://api.openai.com/v1")
     try:
-        if isinstance(timeout, httpx.Timeout):
-            httpx_timeout = timeout
-            wait_timeout = timeout.read
-        else:
-            httpx_timeout = httpx.Timeout(timeout)
-            wait_timeout = timeout
         return await asyncio.wait_for(
             chat_completion(
                 provider=provider,
@@ -305,9 +298,8 @@ async def generate_text(
                 max_tokens=max_tokens,
                 api_type=connection.get("api_type", "chat_completions"),
                 request_params=request_params,
-                timeout=httpx_timeout,
             ),
-            timeout=wait_timeout,
+            timeout=timeout_seconds,
         )
     except Exception:
         logger.warning("[generate_text] generation failed", exc_info=True)
@@ -324,7 +316,7 @@ async def generate_json(
     active_connection: dict | None = None,
     active_model: str = "",
     request_params: dict | None = None,
-    timeout: float | httpx.Timeout = 20,
+    timeout_seconds: float = STREAM_READ_TIMEOUT_SECONDS,
 ) -> dict | None:
     from cptr.utils.json_parser import extract_json
 
@@ -337,7 +329,7 @@ async def generate_json(
         active_connection=active_connection,
         active_model=active_model,
         request_params=request_params,
-        timeout=timeout,
+        timeout_seconds=timeout_seconds,
     )
     if not text:
         return None
