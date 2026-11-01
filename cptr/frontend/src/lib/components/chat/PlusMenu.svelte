@@ -78,7 +78,7 @@
 	const COMPACT_KEEP_DEFAULT = 40;
 	const COMPACT_KEEP_MIN = 0;
 	const COMPACT_KEEP_MAX = 100;
-	const COMPACT_KEEP_STEP = 10;
+	const COMPACT_KEEP_STEP = 5;
 
 	// Clamp on blur: while typing the field holds the raw text, and the value
 	// is committed (clamped back into range) when focus leaves the input.
@@ -121,7 +121,7 @@
 	// cptr/env.py, used only when no context usage has been computed yet.
 	const COMPACT_TOKEN_THRESHOLD_DEFAULT = 80000;
 	const COMPACT_TOKEN_THRESHOLD_MIN = 0;
-	const COMPACT_TOKEN_THRESHOLD_STEP = 10000;
+	const COMPACT_TOKEN_THRESHOLD_STEP = 5000;
 
 	function clampCompactTokenThreshold() {
 		if (compactTokenThreshold === null) return;
