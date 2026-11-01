@@ -20,14 +20,16 @@
 		meta?: Record<string, any> | null;
 		done: boolean;
 		output: any[] | null;
-		compacted?: boolean;
-		compactedSummary?: string | null;
 		/**
-		 * For merged multi-step units: the id of the row carrying the effective
-		 * compaction summary. The icon anchors on that row's first display
-		 * segment instead of group 0. Null for single-row messages (legacy path).
+		 * Every step row in this message carrying a compaction summary, in
+		 * series order. A long task can compact several times inside one
+		 * visible response. Each checkpoint anchors on the first display
+		 * segment containing that row (segment 0 when the row contributes no
+		 * segments); each segment shows at most one marker — when several
+		 * checkpoints anchor on the same segment, only the newest summary is
+		 * shown. Empty when not compacted.
 		 */
-		compactedRowId?: string | null;
+		compactedRows?: { id: string; chat_summary: string | null }[];
 		/** True when this unit merges several step rows (disables save-as-copy). */
 		multiStep?: boolean;
 		/** Row that owns the editable content/output of a merged unit. */
@@ -51,9 +53,7 @@
 		meta = null,
 		done,
 		output,
-		compacted = false,
-		compactedSummary = null,
-		compactedRowId = null,
+		compactedRows = [],
 		multiStep = false,
 		editRow = null,
 		usage,
@@ -441,24 +441,29 @@
 		);
 	});
 
-	// First display segment derived from the compacted step row (merged units
-	// only). Falls back to the unit head when the row contributes no segments.
-	const compactedAnchorIdx = $derived.by((): number => {
-		if (!compacted || !compactedRowId) return -1;
-		const idx = displayItems.findIndex((it: any) => (it.rowIds ?? []).includes(compactedRowId!));
-		return idx >= 0 ? idx : 0;
+	// Compaction summary anchored on each display segment, keyed by segment index.
+	// Each summary row anchors on the first segment whose rowIds contain it,
+	// falling back to the unit head when the row contributes no segments. When
+	// several checkpoints anchor on the same segment, only the newest one is
+	// kept (rows are walked in series order, later rows overwrite earlier).
+	const compactedAnchors = $derived.by((): Map<number, string | null> => {
+		const anchors = new Map<number, string | null>();
+		for (const row of compactedRows) {
+			const idx = displayItems.findIndex((it: any) => (it.rowIds ?? []).includes(row.id));
+			const at = idx >= 0 ? idx : 0;
+			anchors.set(at, row.chat_summary);
+		}
+		return anchors;
 	});
 
-	function showCompactedIcon(groupIdx: number): boolean {
-		if (!compacted) return false;
-		if (!compactedRowId) return groupIdx === 0; // legacy single-row path
-		return groupIdx === compactedAnchorIdx;
+	function compactedSummaryAt(groupIdx: number): string | null {
+		return compactedAnchors.get(groupIdx) ?? null;
 	}
 
 	// Clicking a compaction icon opens the in-page summary window (rendered
 	// at the layout level); hover only shows the plain label tooltip.
-	function openCompaction() {
-		if (compactedSummary) compactionSummaryOpen.set(compactedSummary);
+	function openCompaction(summary: string | null) {
+		if (summary) compactionSummaryOpen.set(summary);
 	}
 
 	/** Format usage data for tooltip display */
@@ -530,13 +535,14 @@
 				></span>
 			{:else}
 				{#if done && displayItems.length === 0 && content}
-					{#if compacted && responseStartsWithText}
+					{@const newestRow = compactedRows[compactedRows.length - 1] ?? null}
+					{#if newestRow && responseStartsWithText}
 						<button
 							type="button"
 							class="float-left mr-1 mt-1 text-sky-500 dark:text-sky-400 cursor-pointer"
 							aria-label={$t('chat.compacted')}
 							use:tooltip={$t('chat.compacted')}
-							onclick={openCompaction}
+							onclick={() => openCompaction(newestRow.chat_summary)}
 						>
 							<Icon name="archive" size={14} />
 						</button>
@@ -547,13 +553,14 @@
 					{#if displayItem.type === 'message_item'}
 						{@const messageText = stripStructuredImageMarkdown(messageItemText(displayItem.item))}
 						{#if messageText}
-							{#if showCompactedIcon(groupIdx)}
+							{@const summary = compactedSummaryAt(groupIdx)}
+							{#if summary}
 								<button
 									type="button"
 									class="float-left mr-1 mt-1 text-sky-500 dark:text-sky-400 cursor-pointer"
 									aria-label={$t('chat.compacted')}
 									use:tooltip={$t('chat.compacted')}
-									onclick={openCompaction}
+									onclick={() => openCompaction(summary)}
 								>
 									<Icon name="archive" size={14} />
 								</button>
@@ -655,12 +662,13 @@
 					{:else if displayItem.type === 'activity_group'}
 						{#if displayItem.entries.length === 1}
 							{@const item = displayItem.entries[0]}
+							{@const summary = compactedSummaryAt(groupIdx)}
 							{#if item.type === 'reasoning'}
 								<ReasoningCollapsible
 									{item}
 									fallbackId={`reasoning-${groupIdx}-0`}
-									compacted={showCompactedIcon(groupIdx)}
-									{compactedSummary}
+									compacted={summary != null}
+									compactedSummary={summary}
 								/>
 							{:else}
 								<ToolCallCollapsible
@@ -671,24 +679,25 @@
 									{messageId}
 									{toolLabel}
 									{onapprove}
-									compacted={showCompactedIcon(groupIdx)}
-									{compactedSummary}
+									compacted={summary != null}
+									compactedSummary={summary}
 								/>
 							{/if}
 						{:else}
+							{@const summary = compactedSummaryAt(groupIdx)}
 							<ConsecutiveActivityGroup
 								entries={displayItem.entries}
 								calls={displayItem.calls}
 								reasoning={displayItem.reasoning}
 								outputs={displayItem.outputs}
 								{done}
-								compacted={showCompactedIcon(groupIdx)}
+								compacted={summary != null}
+								compactedSummary={summary}
 								{chatId}
 								{messageId}
 								{groupIdx}
 								{toolLabel}
 								{onapprove}
-								{compactedSummary}
 							/>
 						{/if}
 					{/if}

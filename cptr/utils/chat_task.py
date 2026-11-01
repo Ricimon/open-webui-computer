@@ -1408,6 +1408,38 @@ def _find_safe_split(messages: list[dict], target_keep: int) -> int:
     return split
 
 
+def _advance_split_past_checkpoint(
+    messages: list[dict], split: int, checkpointed_ids: set[str]
+) -> int:
+    """Move a keep-zone boundary past a row that already carries a checkpoint.
+
+    A step row's dicts (its assistant dict plus one tool dict per call) all
+    share the row's id, so a boundary inside such a group — or the tool-pair
+    back-walk landing on it — anchors the checkpoint on that same row. If the
+    row already has a ``chat_summary``, writing the new summary there would
+    clobber the earlier checkpoint: the visible marker for it disappears and
+    a reload truncates at the row without the new summary covering its
+    content. Walk the split forward past the whole id group instead, so the
+    row's content joins the drop zone (the rolled-up summary covers it) and
+    the new checkpoint lands on a later step. If advancing would leave fewer
+    than 2 messages to keep, return the original split unchanged.
+    """
+    n = len(messages)
+    for _ in range(4):  # at most one prior checkpoint sits in scope; allow slack
+        anchor = next((m.get("id") for m in messages[split:] if m.get("id")), None)
+        if anchor is None or anchor not in checkpointed_ids:
+            return split
+        new_split = split
+        while new_split < n and messages[new_split].get("id") == anchor:
+            new_split += 1
+        if new_split <= split or new_split > n - 2:
+            return split
+        while new_split > 0 and messages[new_split].get("role") == "tool":
+            new_split -= 1
+        split = new_split
+    return split
+
+
 def _summary_checkpoint_message_id(keep_zone: list[dict], fallback: str) -> str:
     """Anchor the summary on the first keep-zone message (the split boundary),
     whatever its role. _find_safe_split already aligned the boundary, so the
@@ -2401,6 +2433,15 @@ async def run_chat_task(
             ):
                 target_keep = max(2, len(messages) * compact_keep_percent // 100)
                 split_idx = _find_safe_split(messages, target_keep)
+                # The boundary may land on (or inside the dict group of) a row
+                # that already carries a compaction checkpoint — e.g. the
+                # checkpoint written by an earlier compaction in this same
+                # task, or a pre-task checkpoint at the front of the list.
+                # Advance past it so the new checkpoint lands on a later step
+                # and the old one is preserved.
+                all_rows = await ChatMessage.get_all_by_chat(chat_id)
+                checkpointed_ids = {r.id for r in all_rows if r.chat_summary}
+                split_idx = _advance_split_past_checkpoint(messages, split_idx, checkpointed_ids)
                 drop_zone = messages[:split_idx]
                 keep_zone = messages[split_idx:]
 

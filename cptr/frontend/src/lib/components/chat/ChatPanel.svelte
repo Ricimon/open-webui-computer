@@ -414,29 +414,13 @@
 			return null;
 		}
 
-		get compacted(): boolean {
-			if (!this.multiStep) return Boolean(this.rows[0].compacted);
-			if (this._lastSummaryRow()) return true;
-			// No summary anywhere: same fallback as a single-row unit built from
-			// the series' first row.
-			return Boolean(this.rows[0].compacted);
-		}
-
-		get compactedSummary(): string | null {
-			if (!this.multiStep) return this.rows[0].chat_summary ?? null;
-			const last = this._lastSummaryRow();
-			return (last ? last.chat_summary : this.rows[0].chat_summary) ?? null;
-		}
-
-		get compactedRowId(): string | null {
-			if (!this.multiStep) return null;
-			return this._lastSummaryRow()?.id ?? null;
-		}
-
-		private _lastSummaryRow(): ChatMessageRow | null {
-			let found: ChatMessageRow | null = null;
-			for (const r of this.rows) if (r.chat_summary) found = r;
-			return found;
+		// Every step row in this unit carrying a compaction summary, in series
+		// order. A long task can compact several times inside one visible
+		// response series; each checkpoint keeps its own marker and summary.
+		get compactedRows(): { id: string; chat_summary: string | null }[] {
+			return this.rows
+				.filter((r) => r.chat_summary)
+				.map((r) => ({ id: r.id, chat_summary: r.chat_summary ?? null }));
 		}
 	}
 
@@ -2202,9 +2186,7 @@
 									meta={first.meta}
 									done={unit.done}
 									output={unit.output}
-									compacted={unit.compacted}
-									compactedSummary={unit.compactedSummary}
-									compactedRowId={unit.compactedRowId}
+									compactedRows={unit.compactedRows}
 									multiStep={unit.multiStep}
 									editRow={unit.multiStep ? last : null}
 									usage={unit.usage}
