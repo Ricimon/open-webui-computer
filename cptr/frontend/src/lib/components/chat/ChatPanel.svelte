@@ -1229,13 +1229,23 @@
 		if (streaming && chatId) {
 			const behavior = get(streamingBehavior);
 			if (behavior === 'interrupt') {
-				// Cancel active generation, then fall through to normal send
+				// Cancel active generation, then fall through to normal send.
+				// The server finalizes the cancelled row asynchronously (stream
+				// teardown lags the cancel response), so settle it locally too:
+				// otherwise the old answer keeps showing as generating and its
+				// late done-event reload reflows the whole transcript after our
+				// new prompt has already appeared.
 				const active = allMessages.findLast((m) => m.role === 'assistant' && !m.done);
 				if (active) {
+					cancelledMessageId = active.id;
+					finalizeStreamingMessage(active);
 					try {
 						await cancelTask(chatId, active.id);
 					} catch {}
 					await loadChat(chatId);
+					// Re-apply if the reload raced ahead of the server commit.
+					const refetched = allMessages.find((m) => m.id === active.id);
+					if (refetched && !refetched.done) finalizeStreamingMessage(refetched);
 				}
 			} else {
 				try {
@@ -1322,10 +1332,36 @@
 			const withoutTemp = allMessages.filter((m) => m.id !== tempId);
 			if (result.user_message && result.assistant_message) {
 				allMessages = [...withoutTemp, result.user_message, result.assistant_message];
+				currentMessageId = result.message_id;
 			} else if (result.assistant_message) {
 				allMessages = [...withoutTemp, result.assistant_message];
+				currentMessageId = result.message_id;
+			} else if (result.queued) {
+				// Interrupt raced the server's finalization of the old response,
+				// so this prompt was parked as a queued input. Show it via the
+				// queue UI (same row shape as the 'queue' behavior path); the
+				// pending_inputs_processed reload swaps in the real transcript
+				// rows once the input is promoted.
+				allMessages = [
+					...withoutTemp,
+					{
+						id: result.message_id,
+						parent_id: parentId,
+						role: 'user' as const,
+						content: text,
+						model: selectedModel,
+						done: true,
+						output: null,
+						usage: null,
+						meta: { queued: true },
+						created_at: Date.now()
+					}
+				];
+				currentMessageId = parentId;
+			} else {
+				allMessages = withoutTemp;
+				currentMessageId = parentId;
 			}
-			currentMessageId = result.message_id;
 
 			if (isNew && tabId) {
 				updateTab(tabId, result.chat_id, text.slice(0, 40) || $t('chat.fallbackTitle'));
@@ -1479,17 +1515,13 @@
 		}
 	}
 
-	async function handleCancel() {
-		const active = allMessages.findLast((m) => m.role === 'assistant' && !m.done);
-		if (!active || !chatId) return;
-		stopTtsPlayback();
-
-		// Tell the socket handler to skip the reload for this message
-		cancelledMessageId = active.id;
-
-		// Optimistically mark as done so streaming indicator disappears immediately
-		if (active.output) {
-			for (const item of active.output) {
+	// Optimistically finalize a locally-streaming assistant row: reject pending
+	// tool calls, flush uncommitted streaming text into output items, and mark it
+	// done so the UI settles immediately instead of waiting for the server's late
+	// done event (whose reload is skipped via cancelledMessageId).
+	function finalizeStreamingMessage(msg: ChatMessageRow) {
+		if (msg.output) {
+			for (const item of msg.output) {
 				if (item.type === 'function_call' && item.status === 'pending') {
 					item.status = 'rejected';
 				}
@@ -1499,15 +1531,15 @@
 		// Flush any pending streaming text into the output array so it renders
 		// when done=true. The AssistantMessage component only shows output items
 		// for done messages — raw content is only shown during streaming (!done).
-		const flushedText = (active.output || [])
+		const flushedText = (msg.output || [])
 			.filter((i: any) => i.type === 'message')
 			.flatMap((i: any) => i.content || [])
 			.map((c: any) => c.text)
 			.join('');
-		const pendingText = (active.content || '').slice(flushedText.length);
+		const pendingText = (msg.content || '').slice(flushedText.length);
 		if (pendingText) {
-			active.output = [
-				...(active.output || []),
+			msg.output = [
+				...(msg.output || []),
 				{
 					type: 'message',
 					id: `flush-${Date.now()}`,
@@ -1518,8 +1550,20 @@
 			];
 		}
 
-		active.done = true;
+		msg.done = true;
 		allMessages = [...allMessages];
+	}
+
+	async function handleCancel() {
+		const active = allMessages.findLast((m) => m.role === 'assistant' && !m.done);
+		if (!active || !chatId) return;
+		stopTtsPlayback();
+
+		// Tell the socket handler to skip the reload for this message
+		cancelledMessageId = active.id;
+
+		// Optimistically mark as done so streaming indicator disappears immediately
+		finalizeStreamingMessage(active);
 
 		try {
 			await cancelTask(chatId, active.id);
