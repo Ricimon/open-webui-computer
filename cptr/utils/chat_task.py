@@ -79,6 +79,51 @@ from cptr.utils.identity import identity_for_context
 
 logger = logging.getLogger(__name__)
 
+
+def _is_tool_result_error(value: Any) -> bool:
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if (
+            text.startswith("error:")
+            or text.startswith("exception:")
+            or text.startswith("traceback")
+            or text.startswith("http error!")
+        ):
+            return True
+
+    parsed = value
+    while isinstance(parsed, str):
+        try:
+            parsed = json.loads(parsed)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            break
+
+    if not isinstance(parsed, dict):
+        return False
+
+    error = parsed.get("error")
+    if isinstance(error, str):
+        has_error = bool(error.strip())
+    else:
+        has_error = isinstance(error, (dict, list)) and bool(error)
+    if has_error:
+        return True
+
+    status = parsed.get("status")
+    if isinstance(status, str) and status.strip().lower() in {"error", "failed"}:
+        return True
+
+    if parsed.get("success") is False or parsed.get("ok") is False:
+        message = parsed.get("message")
+        return has_error or (
+            bool(message.strip())
+            if isinstance(message, str)
+            else isinstance(message, (dict, list)) and bool(message)
+        )
+
+    return False
+
+
 ASK_USER_NAME = "ask_user"
 DEFAULT_AUTO_RESOLUTION_MS = 120_000
 ASK_USER_SCHEMA = {
@@ -954,7 +999,11 @@ def _output_items_to_messages(
             ):
                 continue
             pending_reasoning_items.append(item)
-        elif itype == "function_call" and item.get("status") in {"completed", "rejected"}:
+        elif itype == "function_call" and item.get("status") in {
+            "completed",
+            "failed",
+            "rejected",
+        }:
             call_id = item.get("call_id")
             if not call_id or call_id in native_agent_call_ids:
                 continue
@@ -2218,12 +2267,21 @@ async def run_chat_task(
                 if item.get("status") in {"completed", "rejected", "failed"}:
                     continue
                 call_id = item.get("call_id")
-                if call_id and any(
-                    result.get("type") == "function_call_output"
-                    and result.get("call_id") == call_id
-                    for result in output_items
-                ):
-                    item["status"] = "completed"
+                existing_result = next(
+                    (
+                        result
+                        for result in output_items
+                        if result.get("type") == "function_call_output"
+                        and result.get("call_id") == call_id
+                    ),
+                    None,
+                )
+                if call_id and existing_result:
+                    item["status"] = existing_result.get("status") or (
+                        "failed"
+                        if _is_tool_result_error(existing_result.get("output", ""))
+                        else "completed"
+                    )
                     continue
 
                 name = item.get("name", "")
@@ -2306,9 +2364,10 @@ async def run_chat_task(
                     "type": "function_call_output",
                     "call_id": item["call_id"],
                     "output": result,
+                    "status": "failed" if _is_tool_result_error(result) else "completed",
                 }
                 output_items.append(result_item)
-                item["status"] = "completed"
+                item["status"] = result_item["status"]
                 await emit(output=item)
                 await emit(output=result_item)
                 _sync_state()
@@ -2962,9 +3021,10 @@ async def run_chat_task(
                         "type": "function_call_output",
                         "call_id": tc["call_id"],
                         "output": result,
+                        "status": "failed" if _is_tool_result_error(result) else "completed",
                     }
                     output_items.append(result_item)
-                    item["status"] = "completed"
+                    item["status"] = result_item["status"]
                     await emit(output=item)
                     await emit(output=result_item)
                     _sync_state()
@@ -3018,9 +3078,12 @@ async def run_chat_task(
                                 "type": "function_call_output",
                                 "call_id": tc["call_id"],
                                 "output": result,
+                                "status": "failed"
+                                if _is_tool_result_error(result)
+                                else "completed",
                             }
                             output_items.append(result_item)
-                            item["status"] = "completed"
+                            item["status"] = result_item["status"]
                             await emit(output=item)
                             await emit(output=result_item)
                             _sync_state()
@@ -3030,7 +3093,11 @@ async def run_chat_task(
                     [
                         *response_reasoning_items,
                         *([flushed_item] if flushed_item else []),
-                        *(item for _, item in call_items if item.get("status") == "completed"),
+                        *(
+                            item
+                            for _, item in call_items
+                            if item.get("status") in {"completed", "failed"}
+                        ),
                         *sequential_result_items,
                         *delegate_result_items,
                     ]
