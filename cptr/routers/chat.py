@@ -1232,7 +1232,8 @@ async def compact_chat(request: Request, chat_id: str, body: CompactRequest):
     if not isinstance(target, ApiModelTarget):
         target = await first_api_model_target(request.app.state)
 
-    from cptr.utils.chat_task import _load_message_history, _summary_checkpoint_message_id
+    from cptr.utils.chat_task import _load_message_history
+    from cptr.utils.compactor import _summary_checkpoint_message_id
     from cptr.utils.summarize import summarize_messages
 
     messages, existing_summary = await _load_message_history(chat_id, current_msg.parent_id)

@@ -15,6 +15,14 @@ from typing import Any
 
 from cptr.events import EVENTS, publish_event
 from cptr.env import CHAT_MAX_ITERATIONS, CHAT_TOOL_COMMAND_MAX_CHARS, CHAT_TOOL_MAX_CHARS
+from cptr.utils.compactor import (
+    _MAX_OVERFLOW_COMPACTIONS,
+    _advance_split_past_checkpoint,
+    _compaction_boundary_viable,
+    _find_safe_split,
+    _is_context_exceeded_error,
+    _summary_checkpoint_message_id,
+)
 from cptr.utils.context import (
     apply_chat_compact_token_threshold,
     build_context_usage,
@@ -1430,73 +1438,6 @@ def _strip_internal_fields(messages: list[dict]) -> list[dict]:
     return [{k: v for k, v in m.items() if k not in ("id", "meta")} for m in messages]
 
 
-def _find_safe_split(messages: list[dict], target_keep: int) -> int:
-    """Find a safe split index that doesn't break tool call pairs.
-
-    Returns the index where keep_zone starts. Ensures:
-    - Never splits between an assistant tool_call and its tool result
-    - keep_zone doesn't start with a tool result message
-    - At least 2 messages are kept
-
-    Step rows of one assistant task may be split: each row co-locates a
-    generation's tool calls with their results, so any boundary that doesn't
-    start on a tool result is pair-safe. Allowing mid-series boundaries is
-    what lets mid-task compaction trim the running task's own older steps
-    instead of only pre-task history (which made compaction a no-op once the
-    series dominated the context).
-    """
-    n = len(messages)
-    split = min(max(2, n - target_keep), max(0, n - 2))
-
-    # Don't start keep_zone with a tool result; keep its assistant call too.
-    while split > 0 and messages[split].get("role") == "tool":
-        split -= 1
-
-    return split
-
-
-def _advance_split_past_checkpoint(
-    messages: list[dict], split: int, checkpointed_ids: set[str]
-) -> int:
-    """Move a keep-zone boundary past a row that already carries a checkpoint.
-
-    A step row's dicts (its assistant dict plus one tool dict per call) all
-    share the row's id, so a boundary inside such a group — or the tool-pair
-    back-walk landing on it — anchors the checkpoint on that same row. If the
-    row already has a ``chat_summary``, writing the new summary there would
-    clobber the earlier checkpoint: the visible marker for it disappears and
-    a reload truncates at the row without the new summary covering its
-    content. Walk the split forward past the whole id group instead, so the
-    row's content joins the drop zone (the rolled-up summary covers it) and
-    the new checkpoint lands on a later step. If advancing would leave fewer
-    than 2 messages to keep, return the original split unchanged.
-    """
-    n = len(messages)
-    for _ in range(4):  # at most one prior checkpoint sits in scope; allow slack
-        anchor = next((m.get("id") for m in messages[split:] if m.get("id")), None)
-        if anchor is None or anchor not in checkpointed_ids:
-            return split
-        new_split = split
-        while new_split < n and messages[new_split].get("id") == anchor:
-            new_split += 1
-        if new_split <= split or new_split > n - 2:
-            return split
-        while new_split > 0 and messages[new_split].get("role") == "tool":
-            new_split -= 1
-        split = new_split
-    return split
-
-
-def _summary_checkpoint_message_id(keep_zone: list[dict], fallback: str) -> str:
-    """Anchor the summary on the first keep-zone message (the split boundary),
-    whatever its role. _find_safe_split already aligned the boundary, so the
-    keep zone survives reloads intact."""
-    for message in keep_zone:
-        if message.get("id"):
-            return message["id"]
-    return fallback
-
-
 async def _ensure_current_prompt(
     messages: list[dict],
     chat_id: str,
@@ -2479,6 +2420,113 @@ async def run_chat_task(
             row_meta = {**row_meta, "task_root": series_root_id}
             await ChatMessage.update(message_id, meta=row_meta)
 
+        # One standard compaction pass over the current message list (which
+        # starts at the last summary checkpoint): keep the newest
+        # ``compact_keep_percent``% anchored past any existing checkpoint,
+        # summarize what is dropped, rewrite system + history. Returns False
+        # without side effects when nothing can be dropped or the boundary
+        # would land on a row that already carries a summary.
+        async def _compact_history(reason: str) -> bool:
+            nonlocal messages, system, last_usage, new_messages_since, loaded_summary
+
+            target_keep = max(2, len(messages) * compact_keep_percent // 100)
+            split_idx = _find_safe_split(messages, target_keep)
+            # The boundary may land on (or inside the dict group of) a row
+            # that already carries a compaction checkpoint — e.g. the
+            # checkpoint written by an earlier compaction in this same
+            # task, or a pre-task checkpoint at the front of the list.
+            # Advance past it so the new checkpoint lands on a later step
+            # and the old one is preserved.
+            all_rows = await ChatMessage.get_all_by_chat(chat_id)
+            checkpointed_ids = {r.id for r in all_rows if r.chat_summary}
+            split_idx = _advance_split_past_checkpoint(messages, split_idx, checkpointed_ids)
+
+            if not _compaction_boundary_viable(messages, split_idx, checkpointed_ids):
+                # Either nothing is older than the keep zone, or the boundary
+                # would clobber an existing summary: this pass cannot shrink
+                # the context without losing a checkpoint.
+                logger.warning(
+                    "[task %s] compaction (%s) cannot proceed: nothing to drop or boundary would clobber an existing summary",
+                    message_id[:8],
+                    reason,
+                )
+                return False
+
+            drop_zone = messages[:split_idx]
+            keep_zone = messages[split_idx:]
+
+            summary = await summarize_messages(
+                drop_zone,
+                loaded_summary,
+                connection,
+                model,
+            )
+
+            checkpoint_message_id = _summary_checkpoint_message_id(
+                keep_zone, summary_message_id
+            )
+            await ChatMessage.update(checkpoint_message_id, chat_summary=summary)
+            loaded_summary = summary
+            # Tell connected clients where the checkpoint landed so the
+            # compaction indicator can appear mid-task without a reload.
+            await emit(
+                type="message_compacted",
+                row_id=checkpoint_message_id,
+                chat_summary=summary,
+            )
+
+            # Append summary to system prompt (works for all providers)
+            memory_message, memory_files = _memory_recall_inputs(keep_zone, regeneration_prompt)
+            system = await _load_system_prompt(
+                request,
+                workspace,
+                model,
+                user_id=user_id,
+                current_message=memory_message,
+                recent_messages=keep_zone,
+                mentioned_files=memory_files,
+            )
+            system += f"\n\n[CONVERSATION SUMMARY]\n{summary}"
+            # Re-inject attached skills after compaction (protect from pruning)
+            if attached_skill_ids:
+                skill_blocks = []
+                for sid in attached_skill_ids:
+                    skill = load_skill(workspace, sid)
+                    if skill:
+                        skill_blocks.append(format_skill_content(skill))
+                if skill_blocks:
+                    system += "\n\n" + "\n\n".join(skill_blocks)
+            system = await _apply_voice_mode_system_prompt(system, chat_params)
+            # Keep the prompt that started this task in the user content
+            # (the checkpoint above is already written, so its position is
+            # unchanged; the prompt also remains captured in the summary).
+            current_prompt_kept = (
+                summary_message_id != message_id
+                and not any(m.get("id") == summary_message_id for m in keep_zone)
+            )
+            messages = await _ensure_current_prompt(
+                keep_zone, chat_id, summary_message_id, message_id, source=drop_zone
+            )
+            last_usage = None  # reset after compaction
+            new_messages_since = 0
+
+            logger.info(
+                "[task %s] compacted (%s): checkpoint=%s dropped %d msgs, kept %d, summary=%d chars, current_prompt_kept=%s",
+                message_id[:8],
+                reason,
+                checkpoint_message_id[:8],
+                len(drop_zone),
+                len(keep_zone),
+                len(summary),
+                current_prompt_kept,
+            )
+            return True
+
+        # Overflow-compaction budget for this task: how many times the API has
+        # rejected the request with a context-exceeded error and we have
+        # compacted + retried in response.
+        overflow_compactions = 0
+
         for _iteration in range(CHAT_MAX_ITERATIONS):
             # ── Context compaction: summarize older messages if too large ──
             if compact_keep_percent < 100 and should_compact(
@@ -2488,94 +2536,7 @@ async def run_chat_task(
                 new_messages_since,
                 threshold=compact_token_threshold,
             ):
-                target_keep = max(2, len(messages) * compact_keep_percent // 100)
-                split_idx = _find_safe_split(messages, target_keep)
-                # The boundary may land on (or inside the dict group of) a row
-                # that already carries a compaction checkpoint — e.g. the
-                # checkpoint written by an earlier compaction in this same
-                # task, or a pre-task checkpoint at the front of the list.
-                # Advance past it so the new checkpoint lands on a later step
-                # and the old one is preserved.
-                all_rows = await ChatMessage.get_all_by_chat(chat_id)
-                checkpointed_ids = {r.id for r in all_rows if r.chat_summary}
-                split_idx = _advance_split_past_checkpoint(messages, split_idx, checkpointed_ids)
-                drop_zone = messages[:split_idx]
-                keep_zone = messages[split_idx:]
-
-                if not drop_zone:
-                    # Tool-pair alignment walked the boundary back to the very
-                    # start: nothing is older than the keep zone, so this pass
-                    # cannot shrink the context. Skip rather than write a
-                    # checkpoint that would truncate the whole history on reload.
-                    logger.warning(
-                        "[task %s] compaction boundary hit the start; nothing to drop",
-                        message_id[:8],
-                    )
-                else:
-                    summary = await summarize_messages(
-                        drop_zone,
-                        loaded_summary,
-                        connection,
-                        model,
-                    )
-
-                    checkpoint_message_id = _summary_checkpoint_message_id(
-                        keep_zone, summary_message_id
-                    )
-                    await ChatMessage.update(checkpoint_message_id, chat_summary=summary)
-                    loaded_summary = summary
-                    # Tell connected clients where the checkpoint landed so the
-                    # compaction indicator can appear mid-task without a reload.
-                    await emit(
-                        type="message_compacted",
-                        row_id=checkpoint_message_id,
-                        chat_summary=summary,
-                    )
-
-                    # Append summary to system prompt (works for all providers)
-                    memory_message, memory_files = _memory_recall_inputs(keep_zone, regeneration_prompt)
-                    system = await _load_system_prompt(
-                        request,
-                        workspace,
-                        model,
-                        user_id=user_id,
-                        current_message=memory_message,
-                        recent_messages=keep_zone,
-                        mentioned_files=memory_files,
-                    )
-                    system += f"\n\n[CONVERSATION SUMMARY]\n{summary}"
-                    # Re-inject attached skills after compaction (protect from pruning)
-                    if attached_skill_ids:
-                        skill_blocks = []
-                        for sid in attached_skill_ids:
-                            skill = load_skill(workspace, sid)
-                            if skill:
-                                skill_blocks.append(format_skill_content(skill))
-                        if skill_blocks:
-                            system += "\n\n" + "\n\n".join(skill_blocks)
-                    system = await _apply_voice_mode_system_prompt(system, chat_params)
-                    # Keep the prompt that started this task in the user content
-                    # (the checkpoint above is already written, so its position is
-                    # unchanged; the prompt also remains captured in the summary).
-                    current_prompt_kept = (
-                        summary_message_id != message_id
-                        and not any(m.get("id") == summary_message_id for m in keep_zone)
-                    )
-                    messages = await _ensure_current_prompt(
-                        keep_zone, chat_id, summary_message_id, message_id, source=drop_zone
-                    )
-                    last_usage = None  # reset after compaction
-                    new_messages_since = 0
-
-                    logger.info(
-                        "[task %s] compacted: checkpoint=%s dropped %d msgs, kept %d, summary=%d chars, current_prompt_kept=%s",
-                        message_id[:8],
-                        checkpoint_message_id[:8],
-                        len(drop_zone),
-                        len(keep_zone),
-                        len(summary),
-                        current_prompt_kept,
-                    )
+                await _compact_history("threshold")
 
             # Anthropic supports images natively in tool_result content blocks.
             # Chat Completions and Responses API don't support multimodal tool messages,
@@ -2657,119 +2618,154 @@ async def run_chat_task(
                     )
                 )
 
-            async for event in stream:
-                if event["type"] == "text_delta":
-                    content += event["content"]
-                    series_text += event["content"]
-                    text_buffer += event["content"]
-                    await emit(delta=event["content"])
-                    if provider_type == "llama.cpp" and usage_context_tokens(last_usage) <= 0:
-                        estimated_context_tokens = estimated_prompt_tokens + estimate_tokens(
-                            content
-                        )
-                        if estimated_context_tokens - last_emitted_context_tokens >= 256:
-                            last_emitted_context_tokens = estimated_context_tokens
-                            await emit(
-                                context_usage=build_context_usage(
-                                    estimated_context_tokens,
-                                    threshold=compact_token_threshold,
-                                )
-                            )
-                    _sync_state()
-
-                elif event["type"] == "tool_call":
-                    # Collect tool call — don't execute yet
-                    call_id = event["call_id"]
-                    if call_id in pending_call_ids:
-                        logger.warning(
-                            "[task %s] ignoring duplicate tool call id=%s name=%s",
-                            message_id[:8],
-                            call_id,
-                            event["name"],
-                        )
-                        continue
-                    pending_call_ids.add(call_id)
-                    pending_calls.append(event)
-
-                elif event["type"] in ("output", "reasoning"):
-                    # Providers stream normalized Responses-style output items.
-                    # "reasoning" is kept temporarily for compatibility with older
-                    # provider adapters.
-                    item = event["item"]
-                    _upsert_output_item(output_items, item)
-                    if item.get("type") == "reasoning":
-                        streamed_reasoning_chars = max(
-                            streamed_reasoning_chars,
-                            _reasoning_text_len(item),
-                        )
-                        if item.get("status") in (None, "completed"):
-                            _upsert_output_item(response_reasoning_items, item)
-                    logger.info(
-                        "[task %s] output item: type=%s status=%s output=%d items reasoning_chars=%d response_reasoning_items=%d",
-                        message_id[:8],
-                        item.get("type"),
-                        item.get("status"),
-                        len(output_items),
-                        streamed_reasoning_chars,
-                        len(response_reasoning_items),
-                    )
-                    _sync_state()
-                    await emit(output=item)
-
-                elif event["type"] == "usage":
-                    usage = normalize_usage({k: v for k, v in event.items() if k != "type"})
-                    last_usage = usage
-                    step_usage = usage
-                    new_messages_since = 0
-                    tokens = usage_context_tokens(usage)
-                    if tokens > 0:
-                        await emit(
-                            context_usage=build_context_usage(
-                                tokens, threshold=compact_token_threshold
-                            )
-                        )
-
-                elif event["type"] == "done":
-                    # Stream ended. Usage may have arrived earlier, multiple times, or never.
-                    if not pending_calls:
-                        _flush_text()
-                        if streamed_reasoning_chars and not response_reasoning_items:
-                            logger.warning(
-                                "[task %s] reasoning output streamed (%d chars) but no completed reasoning item arrived before done; DB output may contain only in-progress reasoning",
-                                message_id[:8],
-                                streamed_reasoning_chars,
-                            )
+            stream_started = False  # any event consumed this attempt; overflow errors arrive before the first one
+            try:
+                async for event in stream:
+                    stream_started = True
+                    if event["type"] == "text_delta":
+                        content += event["content"]
+                        series_text += event["content"]
+                        text_buffer += event["content"]
+                        await emit(delta=event["content"])
                         if provider_type == "llama.cpp" and usage_context_tokens(last_usage) <= 0:
                             estimated_context_tokens = estimated_prompt_tokens + estimate_tokens(
                                 content
                             )
+                            if estimated_context_tokens - last_emitted_context_tokens >= 256:
+                                last_emitted_context_tokens = estimated_context_tokens
+                                await emit(
+                                    context_usage=build_context_usage(
+                                        estimated_context_tokens,
+                                        threshold=compact_token_threshold,
+                                    )
+                                )
+                        _sync_state()
+
+                    elif event["type"] == "tool_call":
+                        # Collect tool call — don't execute yet
+                        call_id = event["call_id"]
+                        if call_id in pending_call_ids:
+                            logger.warning(
+                                "[task %s] ignoring duplicate tool call id=%s name=%s",
+                                message_id[:8],
+                                call_id,
+                                event["name"],
+                            )
+                            continue
+                        pending_call_ids.add(call_id)
+                        pending_calls.append(event)
+
+                    elif event["type"] in ("output", "reasoning"):
+                        # Providers stream normalized Responses-style output items.
+                        # "reasoning" is kept temporarily for compatibility with older
+                        # provider adapters.
+                        item = event["item"]
+                        _upsert_output_item(output_items, item)
+                        if item.get("type") == "reasoning":
+                            streamed_reasoning_chars = max(
+                                streamed_reasoning_chars,
+                                _reasoning_text_len(item),
+                            )
+                            if item.get("status") in (None, "completed"):
+                                _upsert_output_item(response_reasoning_items, item)
+                        logger.info(
+                            "[task %s] output item: type=%s status=%s output=%d items reasoning_chars=%d response_reasoning_items=%d",
+                            message_id[:8],
+                            item.get("type"),
+                            item.get("status"),
+                            len(output_items),
+                            streamed_reasoning_chars,
+                            len(response_reasoning_items),
+                        )
+                        _sync_state()
+                        await emit(output=item)
+
+                    elif event["type"] == "usage":
+                        usage = normalize_usage({k: v for k, v in event.items() if k != "type"})
+                        last_usage = usage
+                        step_usage = usage
+                        new_messages_since = 0
+                        tokens = usage_context_tokens(usage)
+                        if tokens > 0:
                             await emit(
                                 context_usage=build_context_usage(
-                                    estimated_context_tokens,
-                                    threshold=compact_token_threshold,
+                                    tokens, threshold=compact_token_threshold
                                 )
                             )
-                        await _save_message(
-                            "done",
-                            content=content,
-                            output=output_items,
-                            usage=last_usage,
-                            done=True,
-                        )
-                        _task_state.pop(message_id, None)
-                        await _emit_done()
-                        preview = series_text[:300] if series_text else ""
-                        await publish_event(
-                            EVENTS.CHAT_FINISHED,
-                            actor={"id": user_id},
-                            subject_id=chat_id,
-                            subject_type="chat",
-                            source="chat_task",
-                            data={"workspace": event_workspace, "preview": preview},
-                            message=preview,
-                        )
-                        task_completed_success = True
-                        return
+
+                    elif event["type"] == "done":
+                        # Stream ended. Usage may have arrived earlier, multiple times, or never.
+                        if not pending_calls:
+                            _flush_text()
+                            if streamed_reasoning_chars and not response_reasoning_items:
+                                logger.warning(
+                                    "[task %s] reasoning output streamed (%d chars) but no completed reasoning item arrived before done; DB output may contain only in-progress reasoning",
+                                    message_id[:8],
+                                    streamed_reasoning_chars,
+                                )
+                            if (
+                                provider_type == "llama.cpp"
+                                and usage_context_tokens(last_usage) <= 0
+                            ):
+                                estimated_context_tokens = (
+                                    estimated_prompt_tokens + estimate_tokens(content)
+                                )
+                                await emit(
+                                    context_usage=build_context_usage(
+                                        estimated_context_tokens,
+                                        threshold=compact_token_threshold,
+                                    )
+                                )
+                            await _save_message(
+                                "done",
+                                content=content,
+                                output=output_items,
+                                usage=last_usage,
+                                done=True,
+                            )
+                            _task_state.pop(message_id, None)
+                            await _emit_done()
+                            preview = series_text[:300] if series_text else ""
+                            await publish_event(
+                                EVENTS.CHAT_FINISHED,
+                                actor={"id": user_id},
+                                subject_id=chat_id,
+                                subject_type="chat",
+                                source="chat_task",
+                                data={"workspace": event_workspace, "preview": preview},
+                                message=preview,
+                            )
+                            task_completed_success = True
+                            return
+            except Exception as exc:
+                # If the provider rejected the request because the prompt
+                # exceeded the model's context window, run a standard compaction
+                # pass (keep the newest compact_keep_percent%, summarize what is
+                # dropped) and retry this iteration. When compaction can no
+                # longer proceed — nothing left to drop, or the boundary would
+                # clobber an existing summary — re-raise so the task fails with
+                # the same error as before this recovery path existed.
+                if (
+                    stream_started
+                    or compact_keep_percent >= 100
+                    or overflow_compactions >= _MAX_OVERFLOW_COMPACTIONS
+                    or not await _is_context_exceeded_error(exc)
+                ):
+                    raise
+                logger.info(
+                    "[task %s] context exceeded from provider; compacting and retrying (%d/%d this task)",
+                    message_id[:8],
+                    overflow_compactions + 1,
+                    _MAX_OVERFLOW_COMPACTIONS,
+                )
+                if not await _compact_history("context exceeded"):
+                    logger.warning(
+                        "[task %s] context exceeded and compaction cannot proceed; failing task",
+                        message_id[:8],
+                    )
+                    raise
+                overflow_compactions += 1
+                continue
 
             # ── Process collected tool calls ────────────────────
             if pending_calls:
