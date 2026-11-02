@@ -17,11 +17,8 @@ from cptr.events import EVENTS, publish_event
 from cptr.env import CHAT_MAX_ITERATIONS, CHAT_TOOL_COMMAND_MAX_CHARS, CHAT_TOOL_MAX_CHARS
 from cptr.utils.compactor import (
     _MAX_OVERFLOW_COMPACTIONS,
-    _advance_split_past_checkpoint,
-    _compaction_boundary_viable,
-    _find_safe_split,
     _is_context_exceeded_error,
-    _summary_checkpoint_message_id,
+    compact_chat_history,
 )
 from cptr.utils.context import (
     apply_chat_compact_token_threshold,
@@ -41,7 +38,6 @@ from cptr.utils.skills import (
     get_skill_settings,
     load_skill,
 )
-from cptr.utils.summarize import summarize_messages
 from cptr.models import (
     Chat,
     ChatMessage,
@@ -2420,107 +2416,28 @@ async def run_chat_task(
             row_meta = {**row_meta, "task_root": series_root_id}
             await ChatMessage.update(message_id, meta=row_meta)
 
-        # One standard compaction pass over the current message list (which
-        # starts at the last summary checkpoint): keep the newest
-        # ``compact_keep_percent``% anchored past any existing checkpoint,
-        # summarize what is dropped, rewrite system + history. Returns False
-        # without side effects when nothing can be dropped or the boundary
-        # would land on a row that already carries a summary.
-        async def _compact_history(reason: str) -> bool:
-            nonlocal messages, system, last_usage, new_messages_since, loaded_summary
-
-            target_keep = max(2, len(messages) * compact_keep_percent // 100)
-            split_idx = _find_safe_split(messages, target_keep)
-            # The boundary may land on (or inside the dict group of) a row
-            # that already carries a compaction checkpoint — e.g. the
-            # checkpoint written by an earlier compaction in this same
-            # task, or a pre-task checkpoint at the front of the list.
-            # Advance past it so the new checkpoint lands on a later step
-            # and the old one is preserved.
-            all_rows = await ChatMessage.get_all_by_chat(chat_id)
-            checkpointed_ids = {r.id for r in all_rows if r.chat_summary}
-            split_idx = _advance_split_past_checkpoint(messages, split_idx, checkpointed_ids)
-
-            if not _compaction_boundary_viable(messages, split_idx, checkpointed_ids):
-                # Either nothing is older than the keep zone, or the boundary
-                # would clobber an existing summary: this pass cannot shrink
-                # the context without losing a checkpoint.
-                logger.warning(
-                    "[task %s] compaction (%s) cannot proceed: nothing to drop or boundary would clobber an existing summary",
-                    message_id[:8],
-                    reason,
-                )
-                return False
-
-            drop_zone = messages[:split_idx]
-            keep_zone = messages[split_idx:]
-
-            summary = await summarize_messages(
-                drop_zone,
-                loaded_summary,
-                connection,
-                model,
-            )
-
-            checkpoint_message_id = _summary_checkpoint_message_id(
-                keep_zone, summary_message_id
-            )
-            await ChatMessage.update(checkpoint_message_id, chat_summary=summary)
-            loaded_summary = summary
-            # Tell connected clients where the checkpoint landed so the
-            # compaction indicator can appear mid-task without a reload.
-            await emit(
-                type="message_compacted",
-                row_id=checkpoint_message_id,
-                chat_summary=summary,
-            )
-
-            # Append summary to system prompt (works for all providers)
-            memory_message, memory_files = _memory_recall_inputs(keep_zone, regeneration_prompt)
-            system = await _load_system_prompt(
-                request,
-                workspace,
-                model,
-                user_id=user_id,
-                current_message=memory_message,
-                recent_messages=keep_zone,
-                mentioned_files=memory_files,
-            )
-            system += f"\n\n[CONVERSATION SUMMARY]\n{summary}"
-            # Re-inject attached skills after compaction (protect from pruning)
-            if attached_skill_ids:
-                skill_blocks = []
-                for sid in attached_skill_ids:
-                    skill = load_skill(workspace, sid)
-                    if skill:
-                        skill_blocks.append(format_skill_content(skill))
-                if skill_blocks:
-                    system += "\n\n" + "\n\n".join(skill_blocks)
-            system = await _apply_voice_mode_system_prompt(system, chat_params)
-            # Keep the prompt that started this task in the user content
-            # (the checkpoint above is already written, so its position is
-            # unchanged; the prompt also remains captured in the summary).
-            current_prompt_kept = (
-                summary_message_id != message_id
-                and not any(m.get("id") == summary_message_id for m in keep_zone)
-            )
-            messages = await _ensure_current_prompt(
-                keep_zone, chat_id, summary_message_id, message_id, source=drop_zone
-            )
-            last_usage = None  # reset after compaction
-            new_messages_since = 0
-
-            logger.info(
-                "[task %s] compacted (%s): checkpoint=%s dropped %d msgs, kept %d, summary=%d chars, current_prompt_kept=%s",
-                message_id[:8],
-                reason,
-                checkpoint_message_id[:8],
-                len(drop_zone),
-                len(keep_zone),
-                len(summary),
-                current_prompt_kept,
-            )
-            return True
+        # Stable inputs for the standard compaction pass, shared by the
+        # threshold check below and the context-exceeded recovery in the
+        # stream handler. Prompt-assembly helpers stay here; the boundary /
+        # checkpoint / summarize flow lives in cptr.utils.compactor.
+        compact_history_kwargs = dict(
+            keep_percent=compact_keep_percent,
+            chat_id=chat_id,
+            message_id=message_id,
+            summary_message_id=summary_message_id,
+            connection=connection,
+            model=model,
+            request=request,
+            workspace=workspace,
+            user_id=user_id,
+            attached_skill_ids=attached_skill_ids,
+            chat_params=chat_params,
+            regeneration_prompt=regeneration_prompt,
+            emit=emit,
+            memory_recall_inputs=_memory_recall_inputs,
+            apply_voice_mode_system_prompt=_apply_voice_mode_system_prompt,
+            ensure_current_prompt=_ensure_current_prompt,
+        )
 
         # Overflow-compaction budget for this task: how many times the API has
         # rejected the request with a context-exceeded error and we have
@@ -2536,7 +2453,16 @@ async def run_chat_task(
                 new_messages_since,
                 threshold=compact_token_threshold,
             ):
-                await _compact_history("threshold")
+                compacted = await compact_chat_history(
+                    messages=messages,
+                    loaded_summary=loaded_summary,
+                    reason="threshold",
+                    **compact_history_kwargs,
+                )
+                if compacted is not None:
+                    messages, system, loaded_summary = compacted
+                    last_usage = None  # reset after compaction
+                    new_messages_since = 0
 
             # Anthropic supports images natively in tool_result content blocks.
             # Chat Completions and Responses API don't support multimodal tool messages,
@@ -2758,12 +2684,21 @@ async def run_chat_task(
                     overflow_compactions + 1,
                     _MAX_OVERFLOW_COMPACTIONS,
                 )
-                if not await _compact_history("context exceeded"):
+                compacted = await compact_chat_history(
+                    messages=messages,
+                    loaded_summary=loaded_summary,
+                    reason="context exceeded",
+                    **compact_history_kwargs,
+                )
+                if compacted is None:
                     logger.warning(
                         "[task %s] context exceeded and compaction cannot proceed; failing task",
                         message_id[:8],
                     )
                     raise
+                messages, system, loaded_summary = compacted
+                last_usage = None  # reset after compaction
+                new_messages_since = 0
                 overflow_compactions += 1
                 continue
 

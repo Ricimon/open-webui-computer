@@ -2,6 +2,18 @@
 
 from __future__ import annotations
 
+import logging
+from collections.abc import Awaitable, Callable
+
+from fastapi import Request
+
+from cptr.models import ChatMessage
+from cptr.utils.prompt_templates import load_system_prompt
+from cptr.utils.skills import format_skill_content, load_skill
+from cptr.utils.summarize import summarize_messages
+
+logger = logging.getLogger(__name__)
+
 
 def _find_safe_split(messages: list[dict], target_keep: int) -> int:
     """Find a safe split index that doesn't break tool call pairs.
@@ -140,3 +152,122 @@ def _summary_checkpoint_message_id(keep_zone: list[dict], fallback: str) -> str:
         if message.get("id"):
             return message["id"]
     return fallback
+
+
+# Successful-pass result: (new_messages, new_system, new_loaded_summary).
+# The caller resets its usage tracking (last_usage=None, new_messages_since=0).
+CompactionResult = tuple[list[dict], str, str | None] | None
+
+
+async def compact_chat_history(
+    *,
+    messages: list[dict],
+    keep_percent: int,
+    chat_id: str,
+    message_id: str,
+    summary_message_id: str,
+    loaded_summary: str | None,
+    connection: dict,
+    model: str,
+    request: Request,
+    workspace: str,
+    user_id: str | None,
+    attached_skill_ids: list[str],
+    chat_params: dict,
+    regeneration_prompt: str | None,
+    reason: str,
+    emit: Callable[..., Awaitable[None]],
+    memory_recall_inputs: Callable[[list[dict], str | None], tuple[str, list[str]]],
+    apply_voice_mode_system_prompt: Callable[[str, dict], Awaitable[str]],
+    ensure_current_prompt: Callable[..., Awaitable[list[dict]]],
+) -> CompactionResult:
+    """Run one standard compaction pass over a task's message list.
+
+    The list starts at the last summary checkpoint. Keeps the newest
+    ``keep_percent``% anchored past any existing checkpoint, summarizes what
+    is dropped, writes the checkpoint, and rebuilds the system prompt and
+    history for the next request. Returns None without side effects when
+    nothing can be dropped or the boundary would land on a row that already
+    carries a summary; otherwise returns (new_messages, new_system,
+    new_loaded_summary).
+
+    The prompt-assembly steps that live in cptr.utils.chat_task (memory-recall
+    inputs, voice-mode suffix, current-prompt restoration) are passed in as
+    callables so this module owns only the boundary/checkpoint/summarize flow.
+    """
+    target_keep = max(2, len(messages) * keep_percent // 100)
+    split_idx = _find_safe_split(messages, target_keep)
+    # The boundary may land on (or inside the dict group of) a row that
+    # already carries a compaction checkpoint — e.g. the checkpoint written
+    # by an earlier compaction in this same task, or a pre-task checkpoint at
+    # the front of the list. Advance past it so the new checkpoint lands on
+    # a later step and the old one is preserved.
+    all_rows = await ChatMessage.get_all_by_chat(chat_id)
+    checkpointed_ids = {r.id for r in all_rows if r.chat_summary}
+    split_idx = _advance_split_past_checkpoint(messages, split_idx, checkpointed_ids)
+
+    if not _compaction_boundary_viable(messages, split_idx, checkpointed_ids):
+        # Either nothing is older than the keep zone, or the boundary would
+        # clobber an existing summary: this pass cannot shrink the context
+        # without losing a checkpoint.
+        logger.warning(
+            "[task %s] compaction (%s) cannot proceed: nothing to drop or boundary would clobber an existing summary",
+            message_id[:8],
+            reason,
+        )
+        return None
+
+    drop_zone = messages[:split_idx]
+    keep_zone = messages[split_idx:]
+
+    summary = await summarize_messages(drop_zone, loaded_summary, connection, model)
+
+    checkpoint_message_id = _summary_checkpoint_message_id(keep_zone, summary_message_id)
+    await ChatMessage.update(checkpoint_message_id, chat_summary=summary)
+    # Tell connected clients where the checkpoint landed so the compaction
+    # indicator can appear mid-task without a reload.
+    await emit(type="message_compacted", row_id=checkpoint_message_id, chat_summary=summary)
+
+    # Append summary to system prompt (works for all providers)
+    memory_message, memory_files = memory_recall_inputs(keep_zone, regeneration_prompt)
+    system = await load_system_prompt(
+        request,
+        workspace,
+        model,
+        user_id=user_id,
+        current_message=memory_message,
+        recent_messages=keep_zone,
+        mentioned_files=memory_files,
+    )
+    system += f"\n\n[CONVERSATION SUMMARY]\n{summary}"
+    # Re-inject attached skills after compaction (protect from pruning)
+    if attached_skill_ids:
+        skill_blocks = []
+        for sid in attached_skill_ids:
+            skill = load_skill(workspace, sid)
+            if skill:
+                skill_blocks.append(format_skill_content(skill))
+        if skill_blocks:
+            system += "\n\n" + "\n\n".join(skill_blocks)
+    system = await apply_voice_mode_system_prompt(system, chat_params)
+    # Keep the prompt that started this task in the user content (the
+    # checkpoint above is already written, so its position is unchanged; the
+    # prompt also remains captured in the summary).
+    current_prompt_kept = summary_message_id != message_id and not any(
+        m.get("id") == summary_message_id for m in keep_zone
+    )
+    new_messages = await ensure_current_prompt(
+        keep_zone, chat_id, summary_message_id, message_id, source=drop_zone
+    )
+
+    logger.info(
+        "[task %s] compacted (%s): checkpoint=%s dropped %d msgs, kept %d, summary=%d chars, current_prompt_kept=%s",
+        message_id[:8],
+        reason,
+        checkpoint_message_id[:8],
+        len(drop_zone),
+        len(keep_zone),
+        len(summary),
+        current_prompt_kept,
+    )
+    return new_messages, system, summary
