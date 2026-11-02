@@ -1179,6 +1179,38 @@ async def _load_message_history(chat_id: str, message_id: str) -> tuple[list[dic
     return result, existing_summary
 
 
+async def _seed_prior_usage(messages: list[dict]) -> tuple[dict | None, int]:
+    """Seed the pre-send compaction check with the previous response's usage.
+
+    Scans the loaded history for the newest assistant entry whose DB row has
+    persisted usable usage (``input_tokens > 0``) and returns it together
+    with the number of entries appended after it. That usage reflects the
+    last API call of that response, so base plus an estimate of the trailing
+    entries predicts the next request far more tightly than re-estimating the
+    whole history from characters. Returns ``(None, 0)`` when nothing usable
+    exists (fresh chat, or a provider that never reported usage), in which
+    case the caller keeps the full character estimate.
+    """
+    # Bounded: every closed step row persists its own usage, so a usable row
+    # is normally within a handful of entries. Cap lookups for long histories
+    # with no persisted usage at all (e.g., legacy llama.cpp chats).
+    max_lookups = 32
+    for offset, entry in enumerate(reversed(messages)):
+        if entry.get("role") != "assistant":
+            continue
+        if max_lookups <= 0:
+            break
+        row_id = entry.get("id")
+        if not row_id:
+            continue
+        row = await ChatMessage.get_by_id(row_id)
+        usage = normalize_usage(row.usage if row else None)
+        if usage and usage.get("input_tokens"):
+            return usage, offset
+        max_lookups -= 1
+    return None, 0
+
+
 def _sanitize_tool_pairs(messages: list[dict]) -> list[dict]:
     """Ensure every tool_call in an assistant message has a matching tool result.
 
@@ -2366,6 +2398,12 @@ async def run_chat_task(
 
         last_usage: dict | None = None  # real usage from last API call
         new_messages_since: int = 0  # messages appended since last API call
+        # One-shot seed for the first compaction check below: the previous
+        # response's persisted usage, so the pre-send estimate starts from
+        # real token counts instead of a full character re-estimate. This
+        # task's own usage events (and post-compaction re-estimates) take
+        # over once the seed is consumed.
+        prior_usage, prior_new_since = await _seed_prior_usage(messages)
 
         # Request params: arbitrary key-value pairs merged into the API request body
         # Merge order: global ("*") → per-model → chat overrides (chat wins)
@@ -2446,11 +2484,26 @@ async def run_chat_task(
 
         for _iteration in range(CHAT_MAX_ITERATIONS):
             # ── Context compaction: summarize older messages if too large ──
+            check_usage = last_usage
+            check_new_since = new_messages_since
+            if check_usage is None and prior_usage is not None:
+                # No usage from this task yet: stand in with the previous
+                # response's persisted usage (one-shot; consumed now).
+                check_usage, check_new_since = prior_usage, prior_new_since
+                prior_usage = None
+                logger.info(
+                    "[task %s] pre-send compact check seeded from prior usage "
+                    "(input=%d output=%d, +%d new entries)",
+                    message_id[:8],
+                    check_usage.get("input_tokens", 0),
+                    check_usage.get("output_tokens", 0),
+                    check_new_since,
+                )
             if compact_keep_percent < 100 and should_compact(
                 messages,
                 system,
-                last_usage,
-                new_messages_since,
+                check_usage,
+                check_new_since,
                 threshold=compact_token_threshold,
             ):
                 compacted = await compact_chat_history(
