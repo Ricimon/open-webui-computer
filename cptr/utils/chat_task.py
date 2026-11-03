@@ -1292,8 +1292,9 @@ def _tool_result_for_model(
 ) -> str | list[dict]:
     """Return the tool result content to send back to the model.
 
-    Image data URIs (read_file on image files) become multimodal blocks so
-    vision models can see the pixels; all other results stay plain text.
+    Image data URIs (read_file on image files) and display_file results with
+    an inlined image become multimodal blocks so vision models can see the
+    pixels; all other results stay plain text.
     """
     if isinstance(result, str):
         if parsed := _parse_image_data_uri(result):
@@ -1304,6 +1305,22 @@ def _tool_result_for_model(
                 {"type": "text", "text": label},
                 {"type": "image", "media_type": media_type, "base64": b64_data},
             ]
+
+    if tool_name == "display_file":
+        try:
+            meta = json.loads(result)
+        except (json.JSONDecodeError, TypeError):
+            return result
+        if isinstance(meta, dict) and meta.get("type") == "file" and meta.get("data_uri"):
+            if parsed := _parse_image_data_uri(meta["data_uri"]):
+                media_type, b64_data = parsed
+                path = str(meta.get("path") or "").strip()
+                label = f"Image displayed: {path}. " if path else "Image displayed. "
+                return [
+                    {"type": "text", "text": label},
+                    {"type": "image", "media_type": media_type, "base64": b64_data},
+                ]
+        return result
 
     if tool_name != "image_generate":
         return result

@@ -1093,7 +1093,7 @@ async def write_file(path: str, content: str, *, __context__: dict) -> str:
 
 
 async def display_file(path: str, *, __context__: dict) -> str:
-    """Display a workspace file inline in chat.
+    """Display a workspace file inline in chat. Image files are also shown to you as visual input.
     Use when the user asks to see, preview, render, or display a file you created or found.
     :param path: Path relative to workspace root.
     """
@@ -1124,19 +1124,30 @@ async def display_file(path: str, *, __context__: dict) -> str:
         display_path = str(full.relative_to(ws))
     except ValueError:
         display_path = str(full)
-    return json.dumps(
-        {
-            "type": "file",
-            "path": display_path,
-            "full_path": str(full),
-            "workspace": str(ws),
-            "name": full.name,
-            "size": file_stat.get("size") or 0,
-            "mime_type": mime_type,
-            "kind": _file_kind(full, mime_type),
-        },
-        ensure_ascii=False,
-    )
+    result = {
+        "type": "file",
+        "path": display_path,
+        "full_path": str(full),
+        "workspace": str(ws),
+        "name": full.name,
+        "size": file_stat.get("size") or 0,
+        "mime_type": mime_type,
+        "kind": _file_kind(full, mime_type),
+    }
+    if mime_type.startswith("image/"):
+        # Inline the image so vision models see it too, not just the user.
+        # Best-effort: any read/encode failure falls back to metadata-only JSON
+        # so the frontend display never regresses.
+        try:
+            image = await Runtime.read_bytes(request, str(full))
+            data_uri = await asyncio.to_thread(
+                _read_image_data, image["data"], full.suffix, display_path
+            )
+        except Exception:
+            data_uri = None
+        if data_uri and data_uri.startswith("data:image/"):
+            result["data_uri"] = data_uri
+    return json.dumps(result, ensure_ascii=False)
 
 
 async def edit_file(
