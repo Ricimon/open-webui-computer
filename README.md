@@ -12,6 +12,7 @@ Changes compared to upstream:
 - Compaction summary max tokens increased from 1000 to 2000.
 - Messages with a compacted summary on them will now show an icon that when clicked, displays the summary contents.
     - To enable this, individual agent steps are saved with their own row ID, rather than saving the entire response under one row ID.
+- If the backend LLM reports context exceeded, compaction will auto-run until context fits or there is nothing left to compact. 
 - Images displayed by the LLM will be passed as multimodal input back to the LLM.
 - GitBar information loading is taken off the main thread so that it doesn't block main chat UI loading.
 - Add reasoning level configuration to the chat Plus menu.
