@@ -1483,6 +1483,46 @@ def _strip_internal_fields(messages: list[dict]) -> list[dict]:
     return [{k: v for k, v in m.items() if k not in ("id", "meta")} for m in messages]
 
 
+def _rehome_tool_images(messages: list[dict]) -> list[dict]:
+    """Re-home image blocks out of multimodal tool messages.
+
+    Chat Completions and Responses API tool messages are text-only, so flatten
+    each one to its text parts and move the image blocks into a user message
+    placed at the tools' chronological position — right after the run of
+    consecutive tool results they came from (or at the end when the history
+    ends on them). Keeping the images in history instead of appending one
+    trailing user prompt per request makes them stable context memory rather
+    than a fresh prompt the model re-acknowledges every turn.
+    """
+    normalized: list[dict] = []
+    pending_images: list[dict] = []
+
+    def flush() -> None:
+        if not pending_images:
+            return
+        normalized.append(
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Images from the tool results above."},
+                    *pending_images,
+                ],
+            }
+        )
+        pending_images.clear()
+
+    for m in messages:
+        if m.get("role") == "tool" and isinstance(m.get("content"), list):
+            text_parts = [part.get("text", "") for part in m["content"] if part.get("type") == "text"]
+            pending_images.extend(part for part in m["content"] if part.get("type") == "image")
+            normalized.append({**m, "content": "\n".join(text_parts)})
+        else:
+            flush()
+            normalized.append(m)
+    flush()
+    return normalized
+
+
 async def _ensure_current_prompt(
     messages: list[dict],
     chat_id: str,
@@ -2535,37 +2575,12 @@ async def run_chat_task(
                     new_messages_since = 0
 
             # Anthropic supports images natively in tool_result content blocks.
-            # Chat Completions and Responses API don't support multimodal tool messages,
-            # so extract images into a follow-up user message.
+            # Chat Completions and Responses API don't support multimodal tool
+            # messages, so re-home each tool's images at their chronological
+            # position (see _rehome_tool_images).
             api_messages = messages
             if provider != "anthropic":
-                image_blocks = []
-                normalized_messages = []
-                for m in api_messages:
-                    if m.get("role") == "tool" and isinstance(m.get("content"), list):
-                        text_parts = []
-                        for part in m["content"]:
-                            if part.get("type") == "text":
-                                text_parts.append(part.get("text", ""))
-                            elif part.get("type") == "image":
-                                image_blocks.append(part)
-                        normalized_messages.append({**m, "content": "\n".join(text_parts)})
-                    else:
-                        normalized_messages.append(m)
-                api_messages = normalized_messages
-                if image_blocks:
-                    api_messages.append(
-                        {
-                            "role": "user",
-                            "content": [
-                                {
-                                    "type": "text",
-                                    "text": "Here are the images from the tool results above.",
-                                },
-                                *image_blocks,
-                            ],
-                        }
-                    )
+                api_messages = _rehome_tool_images(api_messages)
             api_messages = _strip_internal_fields(api_messages)
 
             form_data = ChatCompletionForm(
