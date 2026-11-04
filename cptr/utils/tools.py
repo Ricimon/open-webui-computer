@@ -77,8 +77,7 @@ def _spawn_pty(command: str, cwd: str, env: dict, preexec_fn=None) -> tuple:
     try:
         fcntl.ioctl(slave_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
         proc = subprocess.Popen(
-            command,
-            shell=True,
+            ["/bin/bash", "-c", command],
             stdin=slave_fd,
             stdout=slave_fd,
             stderr=slave_fd,
@@ -1334,7 +1333,9 @@ async def run_command(
             kwargs = {}
             if preexec is not None:
                 kwargs["preexec_fn"] = preexec
-            proc = await asyncio.create_subprocess_shell(
+            proc = await asyncio.create_subprocess_exec(
+                "/bin/bash",
+                "-c",
                 command,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
