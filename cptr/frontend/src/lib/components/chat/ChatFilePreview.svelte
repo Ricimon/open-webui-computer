@@ -13,9 +13,10 @@
 	interface Props {
 		file: any;
 		filePath: string;
+		displayId?: string;
 	}
 
-	let { file, filePath }: Props = $props();
+	let { file, filePath, displayId = '' }: Props = $props();
 
 	const MAX_TEXT_PREVIEW_BYTES = 200_000;
 
@@ -26,7 +27,13 @@
 
 	const kind = $derived(file?.kind || 'binary');
 	const name = $derived(file?.name || filePath.split('/').pop() || '');
-	const viewUrl = $derived(`/api/workspace/files/view?path=${encodeURIComponent(filePath)}`);
+	// The displayId cache key gives each display instance of a file its own URL,
+	// so a new display always fetches the current bytes while an earlier display
+	// of the same path keeps whatever its URL already cached.
+	const viewUrl = $derived(
+		`/api/workspace/files/view?path=${encodeURIComponent(filePath)}` +
+			(displayId ? `&v=${encodeURIComponent(displayId)}` : '')
+	);
 	const shouldReadText = $derived(
 		['markdown', 'text', 'json', 'csv', 'html', 'svg'].includes(kind) &&
 			(typeof file?.size !== 'number' || file.size <= MAX_TEXT_PREVIEW_BYTES)

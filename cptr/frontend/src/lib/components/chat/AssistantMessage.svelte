@@ -616,6 +616,7 @@
 						{@const file = displayItem.item}
 						{@const filePath = resolvedFilePath(file)}
 						{@const fileKey = filePath || file.path || `file-${displayItem.index}`}
+						{@const displayId = displayItem.rowIds?.[0] || `${messageId}-file-${displayItem.index}`}
 						{@const collapsed = Boolean(collapsedFiles[fileKey])}
 						<div
 							class="my-2 w-full max-w-2xl overflow-hidden rounded-xl border border-gray-200 bg-white dark:border-white/8 dark:bg-gray-950/20"
@@ -656,7 +657,7 @@
 								</button>
 							</div>
 							{#if !collapsed}
-								<ChatFilePreview {file} {filePath} />
+								<ChatFilePreview {file} {filePath} {displayId} />
 							{/if}
 						</div>
 					{:else if displayItem.type === 'activity_group'}
