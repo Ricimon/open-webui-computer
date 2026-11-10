@@ -32,7 +32,7 @@ LABEL org.opencontainers.image.description="Open WebUI Computer"
 RUN apt-get update && \
     apt-get install -y --no-install-recommends gh git tini && \
     # Additional deps for agents
-    apt-get install -y --no-install-recommends curl && \
+    apt-get install -y --no-install-recommends curl ripgrep unzip && \
     rm -rf /var/lib/apt/lists/*
 
 # Create non-root user and writable data directory
