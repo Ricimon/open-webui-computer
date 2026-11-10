@@ -14,6 +14,8 @@ Changes compared to upstream:
     - To enable this, individual agent steps are saved with their own row ID, rather than saving the entire response under one row ID.
 - If the backend LLM reports context exceeded, compaction will auto-run until context fits or there is nothing left to compact. 
 - Images displayed by the LLM will be passed as multimodal input back to the LLM.
+- Images that are displayed more than once with the same file name will update to their latest file version rather than reusing the cached old image.
+- Agent shell commands are ran with bash instead of dash.
 - GitBar information loading is taken off the main thread so that it doesn't block main chat UI loading.
 - Add reasoning level configuration to the chat Plus menu.
 - Add compaction token threshold and keep-percent to the chat Plus menu; keep-percent customizes what percentage of past messages are compacted.
@@ -26,7 +28,7 @@ Changes compared to upstream:
 - Reduced first-time workspace load latency by lazily subscribing directory watchers rather than subscribing all watchers recursively.
 - Well-known instruction files (`AGENTS.md`, `AGENT.md`, `MEMORY.md`, `CLAUDE.md`) are searched for recursively upwards in a workspace.
 - Improved browser performance for long-running conversations.
-- `curl` is added as an apt-installed command to the `Dockerfile`.
+- `curl`, `ripgrep`, and `unzip` are added as apt-installed commands to the `Dockerfile`.
 
 This fork has an accompanying article describing how it interfaces with a local AI setup. Read it here:  
 https://www.ricimon.com/setting-up-a-local-ai-workspace/
